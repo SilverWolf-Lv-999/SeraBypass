@@ -55,8 +55,11 @@ public final class JDKUtility {
 
     private static Unsafe getUnsafe() {
         try {
-            return Unsafe.getUnsafe();
-        } catch (RuntimeException exception) {
+            String unsafeClassName = "sun.misc.Unsafe";
+            Field field = Class.forName(unsafeClassName).getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (Unsafe) field.get(null);
+        } catch (Exception exception) {
             throw new IllegalStateException("Could not obtain sun.misc.Unsafe", exception);
         }
     }
