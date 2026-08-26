@@ -3,6 +3,7 @@ package io.github.seraphina;
 import com.sun.jna.Native;
 import io.github.seraphina.agent.Agent;
 import io.github.seraphina.agent.impl.TestSeraTrans;
+import io.github.seraphina.test.TransTarget;
 import io.github.seraphina.utility.jvm.HotSpotMemoryUtility;
 import io.github.seraphina.utility.jvm.JvmtiUtility;
 import io.github.seraphina.utility.hook.SeraLegitHook;
@@ -24,6 +25,18 @@ public class Start {
         SeraLegitHook.hookMethod(Start.class, "a", 0);
         System.out.println(a());
         Agent.reg(new TestSeraTrans());
+        new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(500);
+                    TransTarget.targetAdded();
+                    TransTarget.targetModify();
+                    TransTarget.class.getDeclaredMethod("targetRemoved").invoke(null);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }).start();
     }
 
     public static int a() {
