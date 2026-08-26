@@ -1,27 +1,22 @@
-package io.github.seraphina.utility;
+package io.github.seraphina.utility.reflect;
 
-import sun.misc.Unsafe;
+import io.github.seraphina.utility.jdk.UnsafeUtility;
 
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Objects;
 
-public final class JDKUtility {
-    public static final Unsafe UNSAFE;
-
-    public static final MethodHandles.Lookup LOOKUP;
-
+/** Utilities for selecting and invoking constructors with trusted lookup access. */
+public final class ConstructorUtility {
     public static <T> T allocateInstance(Class<T> clazz) {
         Objects.requireNonNull(clazz, "clazz");
 
         try {
-            return clazz.cast(UNSAFE.allocateInstance(clazz));
-        } catch (InstantiationException e) {
-            throw new IllegalArgumentException("Cannot allocate " + clazz.getName(), e);
+            return clazz.cast(UnsafeUtility.UNSAFE.allocateInstance(clazz));
+        } catch (InstantiationException exception) {
+            throw new IllegalArgumentException("Cannot allocate " + clazz.getName(), exception);
         }
     }
 
@@ -46,36 +41,10 @@ public final class JDKUtility {
 
         try {
             MethodType methodType = MethodType.methodType(void.class, parameterTypes);
-            MethodHandle constructor = LOOKUP.findConstructor(clazz, methodType);
+            MethodHandle constructor = UnsafeUtility.TRUSTED_LOOKUP.findConstructor(clazz, methodType);
             return clazz.cast(constructor.invokeWithArguments(arguments));
         } catch (Throwable throwable) {
             throw rethrow("Could not invoke a constructor for " + clazz.getName(), throwable);
-        }
-    }
-
-    private static Unsafe getUnsafe() {
-        try {
-            String unsafeClassName = "sun.misc.Unsafe";
-            Field field = Class.forName(unsafeClassName).getDeclaredField("theUnsafe");
-            field.setAccessible(true);
-            return (Unsafe) field.get(null);
-        } catch (Exception exception) {
-            throw new IllegalStateException("Could not obtain sun.misc.Unsafe", exception);
-        }
-    }
-
-    private static MethodHandles.Lookup getTrustedLookup() {
-        try {
-            Field implLookupField = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP");
-            Object base = UNSAFE.staticFieldBase(implLookupField);
-            long offset = UNSAFE.staticFieldOffset(implLookupField);
-            MethodHandles.Lookup lookup = (MethodHandles.Lookup) UNSAFE.getObject(base, offset);
-            if (lookup == null) {
-                throw new IllegalStateException("MethodHandles.Lookup.IMPL_LOOKUP is null");
-            }
-            return lookup;
-        } catch (ReflectiveOperationException exception) {
-            throw new IllegalStateException("Could not obtain the trusted method lookup", exception);
         }
     }
 
@@ -108,16 +77,15 @@ public final class JDKUtility {
     }
 
     private static boolean areCompatible(Class<?>[] parameterTypes, Object[] arguments) {
-        for (int i = 0; i < parameterTypes.length; i++) {
-            Object argument = arguments[i];
-            Class<?> parameterType = parameterTypes[i];
+        for (int index = 0; index < parameterTypes.length; index++) {
+            Object argument = arguments[index];
+            Class<?> parameterType = parameterTypes[index];
             if (argument == null) {
                 if (parameterType.isPrimitive()) {
                     return false;
                 }
                 continue;
             }
-
             if (!box(parameterType).isInstance(argument)) {
                 return false;
             }
@@ -127,9 +95,9 @@ public final class JDKUtility {
 
     private static boolean isMoreSpecific(Class<?>[] first, Class<?>[] second) {
         boolean moreSpecific = false;
-        for (int i = 0; i < first.length; i++) {
-            Class<?> firstType = box(first[i]);
-            Class<?> secondType = box(second[i]);
+        for (int index = 0; index < first.length; index++) {
+            Class<?> firstType = box(first[index]);
+            Class<?> secondType = box(second[index]);
             if (!secondType.isAssignableFrom(firstType)) {
                 return false;
             }
@@ -144,8 +112,8 @@ public final class JDKUtility {
         }
         if (type == boolean.class) return Boolean.class;
         if (type == byte.class) return Byte.class;
-        if (type == short.class) return Short.class;
         if (type == char.class) return Character.class;
+        if (type == short.class) return Short.class;
         if (type == int.class) return Integer.class;
         if (type == long.class) return Long.class;
         if (type == float.class) return Float.class;
@@ -161,10 +129,5 @@ public final class JDKUtility {
             throw error;
         }
         return new IllegalStateException(message, throwable);
-    }
-
-    static {
-        UNSAFE = getUnsafe();
-        LOOKUP = getTrustedLookup();
     }
 }

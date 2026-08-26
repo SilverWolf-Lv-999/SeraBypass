@@ -1,4 +1,6 @@
-package io.github.seraphina.utility;
+package io.github.seraphina.utility.hook;
+
+import io.github.seraphina.utility.jdk.UnsafeUtility;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -9,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 public class SeraLegitHook {
 
@@ -39,8 +42,12 @@ public class SeraLegitHook {
     private static final int MAX_METHOD_ID = 0xFFFE;
     private static final Runnable NO_OP = () -> {
     };
+    private static final Consumer<Object> NO_OP_INSTANCE = value -> {
+    };
     private static final AtomicLong NEXT_INJECTED_METHOD_ID = new AtomicLong();
     private static final Map<String, Runnable> INJECTED_METHOD_BODIES = new ConcurrentHashMap<>();
+    private static final Map<String, Consumer<Object>> INJECTED_INSTANCE_METHOD_BODIES =
+            new ConcurrentHashMap<>();
     private static final Map<String, InjectedMethod> INJECTED_METHODS = new ConcurrentHashMap<>();
 
     private static volatile boolean initialized;
@@ -62,6 +69,40 @@ public class SeraLegitHook {
 
         for (Method method : resolveMethods(klass, methodName, new Class<?>[0])) {
             replaceBytecodes(method, constantReturn(method.getReturnType(), returnValue));
+        }
+    }
+
+    /**
+     * Replaces a no-argument instance method returning {@code void} with a Java callback.
+     * The callback receives the original method receiver.
+     */
+    public static void hookInstanceVoidMethod(
+            Class<?> klass, String methodName, Consumer<Object> methodBody) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(methodName, "methodName");
+        Objects.requireNonNull(methodBody, "methodBody");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+            Method targetMethod = findMethodInHierarchy(klass, methodName, new Class<?>[0]);
+            validateInstanceVoidHookTarget(klass, methodName, targetMethod);
+
+            String callbackId = Long.toUnsignedString(
+                    NEXT_INJECTED_METHOD_ID.incrementAndGet(), Character.MAX_RADIX);
+            INJECTED_INSTANCE_METHOD_BODIES.put(callbackId, NO_OP_INSTANCE);
+            try {
+                Class<?> donorClass = createInstanceDonorClass(callbackId, methodName);
+                Method donorMethod = donorClass.getDeclaredMethod(methodName);
+                Object donor = donorClass.getDeclaredConstructor().newInstance();
+                donorMethod.invoke(donor);
+
+                INJECTED_INSTANCE_METHOD_BODIES.put(callbackId, methodBody);
+                replaceMethodImplementation(targetMethod, donorMethod);
+                INJECTED_METHODS.put(callbackId, new InjectedMethod(donorClass, 0L));
+            } catch (Throwable throwable) {
+                INJECTED_INSTANCE_METHOD_BODIES.remove(callbackId);
+                throw instanceMethodHookFailure(klass, methodName, throwable);
+            }
         }
     }
 
@@ -92,7 +133,7 @@ public class SeraLegitHook {
                 MethodLocation donorLocation = locate(donorMethod);
                 verifyMethodName(donorLocation, methodName);
 
-                originalMethodsAddress = JDKUtility.UNSAFE.getLong(
+                originalMethodsAddress = UnsafeUtility.UNSAFE.getLong(
                         targetKlassAddress + methodsOffset);
                 int originalMethodCount = methodArrayLength(originalMethodsAddress);
                 int methodId = nextMethodId(originalMethodsAddress, originalMethodCount);
@@ -100,19 +141,19 @@ public class SeraLegitHook {
                 long donorKlassAddress = klassPointer(donorClass);
                 poolHolderAddress = findConstantPoolHolderAddress(
                         donorLocation.constMethodAddress, donorKlassAddress);
-                originalPoolHolder = JDKUtility.UNSAFE.getLong(poolHolderAddress);
+                originalPoolHolder = UnsafeUtility.UNSAFE.getLong(poolHolderAddress);
 
-                JDKUtility.UNSAFE.putShort(
+                UnsafeUtility.UNSAFE.putShort(
                         donorLocation.constMethodAddress + CONST_METHOD_METHOD_IDNUM_OFFSET,
                         (short) methodId);
-                JDKUtility.UNSAFE.putShort(
+                UnsafeUtility.UNSAFE.putShort(
                         donorLocation.constMethodAddress + CONST_METHOD_ORIGINAL_METHOD_IDNUM_OFFSET,
                         (short) methodId);
-                JDKUtility.UNSAFE.putLongVolatile(null, poolHolderAddress, targetKlassAddress);
+                UnsafeUtility.UNSAFE.putLongVolatile(null, poolHolderAddress, targetKlassAddress);
 
                 replacementMethodsAddress = expandedMethodArray(
                         originalMethodsAddress, donorLocation.methodAddress);
-                JDKUtility.UNSAFE.putLongVolatile(
+                UnsafeUtility.UNSAFE.putLongVolatile(
                         null, targetKlassAddress + methodsOffset, replacementMethodsAddress);
                 installed = true;
                 clearReflectionData(klass);
@@ -125,15 +166,15 @@ public class SeraLegitHook {
                 INJECTED_METHOD_BODIES.put(callbackId, methodBody);
             } catch (Throwable throwable) {
                 if (installed) {
-                    JDKUtility.UNSAFE.putLongVolatile(
+                    UnsafeUtility.UNSAFE.putLongVolatile(
                             null, targetKlassAddress + methodsOffset, originalMethodsAddress);
                 }
                 if (poolHolderAddress != 0L) {
-                    JDKUtility.UNSAFE.putLongVolatile(
+                    UnsafeUtility.UNSAFE.putLongVolatile(
                             null, poolHolderAddress, originalPoolHolder);
                 }
                 if (replacementMethodsAddress != 0L) {
-                    JDKUtility.UNSAFE.freeMemory(replacementMethodsAddress);
+                    UnsafeUtility.UNSAFE.freeMemory(replacementMethodsAddress);
                 }
                 clearReflectionData(klass);
                 INJECTED_METHOD_BODIES.remove(callbackId);
@@ -142,12 +183,48 @@ public class SeraLegitHook {
         }
     }
 
+    public static void runInjectedInstance(String callbackId, Object receiver) {
+        Consumer<Object> methodBody = INJECTED_INSTANCE_METHOD_BODIES.get(callbackId);
+        if (methodBody == null) {
+            throw new IllegalStateException("No injected instance method body registered for " + callbackId);
+        }
+        methodBody.accept(receiver);
+    }
+
     public static void runInjected(String callbackId) {
         Runnable methodBody = INJECTED_METHOD_BODIES.get(callbackId);
         if (methodBody == null) {
             throw new IllegalStateException("No injected method body registered for " + callbackId);
         }
         methodBody.run();
+    }
+
+    private static void validateInstanceVoidHookTarget(
+            Class<?> klass, String methodName, Method targetMethod) {
+        if (targetMethod == null) {
+            throw new IllegalArgumentException(
+                    "No no-argument method " + methodName + " on " + klass.getName());
+        }
+        if (Modifier.isStatic(targetMethod.getModifiers())
+                || Modifier.isAbstract(targetMethod.getModifiers())
+                || Modifier.isNative(targetMethod.getModifiers())
+                || targetMethod.getReturnType() != void.class) {
+            throw new IllegalArgumentException(
+                    "Instance void hook requires a non-native instance method returning void: "
+                            + targetMethod);
+        }
+    }
+
+    private static RuntimeException instanceMethodHookFailure(
+            Class<?> klass, String methodName, Throwable throwable) {
+        if (throwable instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+        if (throwable instanceof Error error) {
+            throw error;
+        }
+        return new IllegalStateException(
+                "Could not hook " + klass.getName() + "." + methodName + "()", throwable);
     }
 
     private static void validateAddMethodTarget(Class<?> klass, String methodName) {
@@ -203,6 +280,81 @@ public class SeraLegitHook {
                 + ".InjectedMethodDonor" + donorId;
         byte[] bytecode = createDonorBytecode(className, methodName, callbackId);
         return new DonorClassLoader(SeraLegitHook.class.getClassLoader()).define(className, bytecode);
+    }
+
+    private static Class<?> createInstanceDonorClass(String callbackId, String methodName) {
+        long donorId = NEXT_INJECTED_METHOD_ID.get();
+        String className = SeraLegitHook.class.getPackageName()
+                + ".InjectedInstanceMethodDonor" + donorId;
+        byte[] bytecode = createInstanceDonorBytecode(className, methodName, callbackId);
+        return new DonorClassLoader(SeraLegitHook.class.getClassLoader()).define(className, bytecode);
+    }
+
+    private static byte[] createInstanceDonorBytecode(
+            String className, String methodName, String callbackId) {
+        String internalClassName = className.replace('.', '/');
+        String hookClassName = SeraLegitHook.class.getName().replace('.', '/');
+
+        try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+             DataOutputStream output = new DataOutputStream(bytes)) {
+            output.writeInt(0xCAFEBABE);
+            output.writeShort(0);
+            output.writeShort(61);
+
+            output.writeShort(19);
+            writeUtf8Constant(output, internalClassName);                 // 1
+            writeClassConstant(output, 1);                                // 2
+            writeUtf8Constant(output, "java/lang/Object");                // 3
+            writeClassConstant(output, 3);                                // 4
+            writeUtf8Constant(output, "<init>");                          // 5
+            writeUtf8Constant(output, "()V");                             // 6
+            writeNameAndTypeConstant(output, 5, 6);                       // 7
+            writeMethodReferenceConstant(output, 4, 7);                   // 8
+            writeUtf8Constant(output, methodName);                        // 9
+            writeUtf8Constant(output, "Code");                            // 10
+            writeUtf8Constant(output, "runInjectedInstance");             // 11
+            writeUtf8Constant(output, "(Ljava/lang/String;Ljava/lang/Object;)V"); // 12
+            writeUtf8Constant(output, hookClassName);                     // 13
+            writeClassConstant(output, 13);                               // 14
+            writeNameAndTypeConstant(output, 11, 12);                    // 15
+            writeMethodReferenceConstant(output, 14, 15);                 // 16
+            writeUtf8Constant(output, callbackId);                        // 17
+            writeStringConstant(output, 17);                              // 18
+
+            output.writeShort(Modifier.PUBLIC | 0x0020);
+            output.writeShort(2);
+            output.writeShort(4);
+            output.writeShort(0);
+            output.writeShort(0);
+            output.writeShort(2);
+
+            writeCodeMethod(
+                    output,
+                    Modifier.PUBLIC,
+                    5,
+                    6,
+                    1,
+                    1,
+                    new byte[]{0x2A, (byte) 0xB7, 0x00, 0x08, RETURN});
+            writeCodeMethod(
+                    output,
+                    Modifier.PUBLIC,
+                    9,
+                    6,
+                    2,
+                    1,
+                    new byte[]{
+                            0x12, 0x12,
+                            0x2A,
+                            (byte) 0xB8, 0x00, 0x10,
+                            RETURN
+                    });
+
+            output.writeShort(0);
+            return bytes.toByteArray();
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not generate the instance donor class", exception);
+        }
     }
 
     private static byte[] createDonorBytecode(
@@ -324,7 +476,7 @@ public class SeraLegitHook {
             throw new IllegalStateException("InstanceKlass does not contain a method array");
         }
 
-        int length = JDKUtility.UNSAFE.getInt(methodsAddress + ARRAY_LENGTH_OFFSET);
+        int length = UnsafeUtility.UNSAFE.getInt(methodsAddress + ARRAY_LENGTH_OFFSET);
         if (length < 0 || length > MAX_METHOD_ID) {
             throw new IllegalStateException("Invalid HotSpot method array length " + length);
         }
@@ -340,11 +492,11 @@ public class SeraLegitHook {
         while (candidate <= MAX_METHOD_ID) {
             boolean used = false;
             for (int index = 0; index < methodCount; index++) {
-                long methodAddress = JDKUtility.UNSAFE.getLong(
+                long methodAddress = UnsafeUtility.UNSAFE.getLong(
                         methodsAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES);
-                long constMethodAddress = JDKUtility.UNSAFE.getLong(
+                long constMethodAddress = UnsafeUtility.UNSAFE.getLong(
                         methodAddress + METHOD_CONST_METHOD_OFFSET);
-                int methodId = Short.toUnsignedInt(JDKUtility.UNSAFE.getShort(
+                int methodId = Short.toUnsignedInt(UnsafeUtility.UNSAFE.getShort(
                         constMethodAddress + CONST_METHOD_METHOD_IDNUM_OFFSET));
                 if (methodId == candidate) {
                     used = true;
@@ -361,7 +513,7 @@ public class SeraLegitHook {
 
     private static long findConstantPoolHolderAddress(
             long constMethodAddress, long donorKlassAddress) {
-        long constantPoolAddress = JDKUtility.UNSAFE.getLong(
+        long constantPoolAddress = UnsafeUtility.UNSAFE.getLong(
                 constMethodAddress + CONST_METHOD_CONSTANTS_OFFSET);
         if (!looksLikeNativePointer(constantPoolAddress)) {
             throw new IllegalStateException("Donor method does not contain a ConstantPool");
@@ -372,7 +524,7 @@ public class SeraLegitHook {
              offset <= CONSTANT_POOL_HOLDER_SCAN_BYTES - Long.BYTES;
              offset += Long.BYTES) {
             long candidateAddress = constantPoolAddress + offset;
-            if (JDKUtility.UNSAFE.getLong(candidateAddress) != donorKlassAddress) {
+            if (UnsafeUtility.UNSAFE.getLong(candidateAddress) != donorKlassAddress) {
                 continue;
             }
             if (holderAddress != 0L) {
@@ -393,19 +545,19 @@ public class SeraLegitHook {
         int replacementMethodCount = originalMethodCount + 1;
         Long[] methodAddresses = new Long[replacementMethodCount];
         for (int index = 0; index < originalMethodCount; index++) {
-            methodAddresses[index] = JDKUtility.UNSAFE.getLong(
+            methodAddresses[index] = UnsafeUtility.UNSAFE.getLong(
                     originalMethodsAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES);
         }
         methodAddresses[originalMethodCount] = donorMethodAddress;
         Arrays.sort(methodAddresses, Comparator.comparingLong(SeraLegitHook::methodNameSymbolAddress));
 
         long byteCount = ARRAY_ELEMENTS_OFFSET + (long) replacementMethodCount * Long.BYTES;
-        long replacementMethodsAddress = JDKUtility.UNSAFE.allocateMemory(byteCount);
-        JDKUtility.UNSAFE.setMemory(replacementMethodsAddress, byteCount, (byte) 0);
-        JDKUtility.UNSAFE.putInt(
+        long replacementMethodsAddress = UnsafeUtility.UNSAFE.allocateMemory(byteCount);
+        UnsafeUtility.UNSAFE.setMemory(replacementMethodsAddress, byteCount, (byte) 0);
+        UnsafeUtility.UNSAFE.putInt(
                 replacementMethodsAddress + ARRAY_LENGTH_OFFSET, replacementMethodCount);
         for (int index = 0; index < replacementMethodCount; index++) {
-            JDKUtility.UNSAFE.putLong(
+            UnsafeUtility.UNSAFE.putLong(
                     replacementMethodsAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES,
                     methodAddresses[index]);
         }
@@ -413,19 +565,19 @@ public class SeraLegitHook {
     }
 
     private static long methodNameSymbolAddress(long methodAddress) {
-        long constMethodAddress = JDKUtility.UNSAFE.getLong(
+        long constMethodAddress = UnsafeUtility.UNSAFE.getLong(
                 methodAddress + METHOD_CONST_METHOD_OFFSET);
-        long constantPoolAddress = JDKUtility.UNSAFE.getLong(
+        long constantPoolAddress = UnsafeUtility.UNSAFE.getLong(
                 constMethodAddress + CONST_METHOD_CONSTANTS_OFFSET);
-        int constantPoolLength = JDKUtility.UNSAFE.getInt(
+        int constantPoolLength = UnsafeUtility.UNSAFE.getInt(
                 constantPoolAddress + CONSTANT_POOL_LENGTH_OFFSET);
-        int nameIndex = Short.toUnsignedInt(JDKUtility.UNSAFE.getShort(
+        int nameIndex = Short.toUnsignedInt(UnsafeUtility.UNSAFE.getShort(
                 constMethodAddress + CONST_METHOD_NAME_INDEX_OFFSET));
         if (nameIndex <= 0 || nameIndex >= constantPoolLength) {
             throw new IllegalStateException("Method has an invalid ConstantPool name index");
         }
 
-        long symbolAddress = JDKUtility.UNSAFE.getLong(
+        long symbolAddress = UnsafeUtility.UNSAFE.getLong(
                 constantPoolAddress + CONSTANT_POOL_ENTRIES_OFFSET + (long) nameIndex * Long.BYTES);
         if (!looksLikeNativePointer(symbolAddress)) {
             throw new IllegalStateException("Method name does not resolve to a HotSpot Symbol");
@@ -435,7 +587,7 @@ public class SeraLegitHook {
 
     private static void verifyMethodName(MethodLocation location, String expectedMethodName) {
         long symbolAddress = methodNameSymbolAddress(location.methodAddress);
-        int length = Short.toUnsignedInt(JDKUtility.UNSAFE.getShort(
+        int length = Short.toUnsignedInt(UnsafeUtility.UNSAFE.getShort(
                 symbolAddress + SYMBOL_LENGTH_OFFSET));
         if (length != expectedMethodName.length()) {
             throw new IllegalStateException("Unsupported HotSpot Symbol layout");
@@ -443,7 +595,7 @@ public class SeraLegitHook {
 
         byte[] bytes = new byte[length];
         for (int index = 0; index < length; index++) {
-            bytes[index] = JDKUtility.UNSAFE.getByte(symbolAddress + SYMBOL_BODY_OFFSET + index);
+            bytes[index] = UnsafeUtility.UNSAFE.getByte(symbolAddress + SYMBOL_BODY_OFFSET + index);
         }
         String actualMethodName = new String(bytes, StandardCharsets.UTF_8);
         if (!expectedMethodName.equals(actualMethodName)) {
@@ -464,7 +616,7 @@ public class SeraLegitHook {
     }
 
     private static void clearReflectionData(Class<?> klass) {
-        JDKUtility.UNSAFE.putObjectVolatile(klass, classReflectionDataOffset, null);
+        UnsafeUtility.UNSAFE.putObjectVolatile(klass, classReflectionDataOffset, null);
     }
 
     private static RuntimeException addMethodFailure(
@@ -665,7 +817,7 @@ public class SeraLegitHook {
             while (!pending.isEmpty()) {
                 long parentKlass = pending.removeFirst();
                 Set<Long> siblings = new HashSet<>();
-                long childKlass = JDKUtility.UNSAFE.getLong(parentKlass + KLASS_SUBKLASS_OFFSET);
+                long childKlass = UnsafeUtility.UNSAFE.getLong(parentKlass + KLASS_SUBKLASS_OFFSET);
                 while (childKlass != 0L) {
                     if (!siblings.add(childKlass)) {
                         throw new IllegalStateException("Cycle in HotSpot Klass sibling chain");
@@ -681,7 +833,7 @@ public class SeraLegitHook {
                         pending.addLast(childKlass);
                     }
 
-                    childKlass = JDKUtility.UNSAFE.getLong(childKlass + KLASS_NEXT_SIBLING_OFFSET);
+                    childKlass = UnsafeUtility.UNSAFE.getLong(childKlass + KLASS_NEXT_SIBLING_OFFSET);
                 }
             }
             return new ArrayList<>(subclasses);
@@ -710,10 +862,10 @@ public class SeraLegitHook {
             // Keep the allocated code size unchanged. Trailing NOPs make a
             // shorter replacement safe after its terminal return instruction.
             for (int i = replacement.length; i < location.codeSize; i++) {
-                JDKUtility.UNSAFE.putByte(location.codeAddress + i, NOP);
+                UnsafeUtility.UNSAFE.putByte(location.codeAddress + i, NOP);
             }
             for (int i = replacement.length - 1; i >= 0; i--) {
-                JDKUtility.UNSAFE.putByte(location.codeAddress + i, replacement[i]);
+                UnsafeUtility.UNSAFE.putByte(location.codeAddress + i, replacement[i]);
             }
         } catch (Exception e) {
             throw new IllegalStateException("Could not replace bytecodes for " + method, e);
@@ -725,7 +877,7 @@ public class SeraLegitHook {
             initialize();
             MethodLocation targetLocation = locate(target);
             MethodLocation replacementLocation = locate(replacement);
-            JDKUtility.UNSAFE.putLong(
+            UnsafeUtility.UNSAFE.putLong(
                     targetLocation.methodAddress + METHOD_CONST_METHOD_OFFSET,
                     replacementLocation.constMethodAddress);
         } catch (Exception e) {
@@ -765,7 +917,7 @@ public class SeraLegitHook {
         }
 
         long klassAddress = klassPointer(klass);
-        int vtableIndex = JDKUtility.UNSAFE.getInt(
+        int vtableIndex = UnsafeUtility.UNSAFE.getInt(
                 methodLocation.methodAddress + METHOD_VTABLE_INDEX_OFFSET);
         if (vtableIndex < 0) {
             throw new IllegalStateException(
@@ -774,12 +926,12 @@ public class SeraLegitHook {
 
         long vtableEntryAddress = klassAddress + vtableStartOffset
                 + (long) vtableIndex * Long.BYTES;
-        if (JDKUtility.UNSAFE.getLong(vtableEntryAddress) == 0L) {
+        if (UnsafeUtility.UNSAFE.getLong(vtableEntryAddress) == 0L) {
             // A class may be visible from the HotSpot subclass chain before linking
             // initializes its vtable. It will inherit the patched parent slot when linked.
             return false;
         }
-        JDKUtility.UNSAFE.putLongVolatile(
+        UnsafeUtility.UNSAFE.putLongVolatile(
                 null, vtableEntryAddress, replacementMethodAddress);
         return true;
     }
@@ -790,7 +942,7 @@ public class SeraLegitHook {
              offset <= VTABLE_LAYOUT_SCAN_BYTES - Long.BYTES;
              offset += Long.BYTES) {
             long candidateAddress = klassAddress + offset;
-            if (JDKUtility.UNSAFE.getLong(candidateAddress) != methodAddress) {
+            if (UnsafeUtility.UNSAFE.getLong(candidateAddress) != methodAddress) {
                 continue;
             }
             if (vtableEntryAddress != 0L) {
@@ -936,11 +1088,11 @@ public class SeraLegitHook {
                 Field resolvedMethod = declaredField(memberName, "method");
                 Field referenceValue = declaredField(ReferenceSlot.class, "value");
                 Field reflectionData = declaredField(Class.class, "reflectionData");
-                directMethodHandleMemberOffset = JDKUtility.UNSAFE.objectFieldOffset(directMember);
-                memberNameResolvedMethodOffset = JDKUtility.UNSAFE.objectFieldOffset(resolvedMethod);
+                directMethodHandleMemberOffset = UnsafeUtility.UNSAFE.objectFieldOffset(directMember);
+                memberNameResolvedMethodOffset = UnsafeUtility.UNSAFE.objectFieldOffset(resolvedMethod);
                 referenceSlot = new ReferenceSlot();
-                referenceSlotValueOffset = JDKUtility.UNSAFE.objectFieldOffset(referenceValue);
-                classReflectionDataOffset = JDKUtility.UNSAFE.objectFieldOffset(reflectionData);
+                referenceSlotValueOffset = UnsafeUtility.UNSAFE.objectFieldOffset(referenceValue);
+                classReflectionDataOffset = UnsafeUtility.UNSAFE.objectFieldOffset(reflectionData);
                 NarrowOopEncoding encoding = deriveNarrowOopEncoding();
                 narrowOopBase = encoding.base;
                 narrowOopShift = encoding.shift;
@@ -980,7 +1132,7 @@ public class SeraLegitHook {
 
         MethodLocation firstLocation = locate(first);
         long klassAddress = klassPointer(probeClass);
-        int firstVtableIndex = JDKUtility.UNSAFE.getInt(
+        int firstVtableIndex = UnsafeUtility.UNSAFE.getInt(
                 firstLocation.methodAddress + METHOD_VTABLE_INDEX_OFFSET);
         if (firstVtableIndex < 0) {
             throw new IllegalStateException("Virtual probe method does not have a vtable index");
@@ -1001,10 +1153,10 @@ public class SeraLegitHook {
     private static void verifyVtableEntry(
             long klassAddress, long startOffset, Method method) throws Exception {
         MethodLocation location = locate(method);
-        int vtableIndex = JDKUtility.UNSAFE.getInt(
+        int vtableIndex = UnsafeUtility.UNSAFE.getInt(
                 location.methodAddress + METHOD_VTABLE_INDEX_OFFSET);
         if (vtableIndex < 0L
-                || JDKUtility.UNSAFE.getLong(
+                || UnsafeUtility.UNSAFE.getLong(
                         klassAddress + startOffset + (long) vtableIndex * Long.BYTES)
                 != location.methodAddress) {
             throw new IllegalStateException("Unsupported HotSpot Method/vtable layout");
@@ -1027,12 +1179,12 @@ public class SeraLegitHook {
         for (long offset = 0L;
              offset <= INSTANCE_KLASS_LAYOUT_SCAN_BYTES - Long.BYTES;
              offset += Long.BYTES) {
-            long methodArrayAddress = JDKUtility.UNSAFE.getLong(probeKlassAddress + offset);
+            long methodArrayAddress = UnsafeUtility.UNSAFE.getLong(probeKlassAddress + offset);
             if (!isCurrentMetadataAddress(methodArrayAddress)) {
                 continue;
             }
 
-            int methodCount = JDKUtility.UNSAFE.getInt(methodArrayAddress + ARRAY_LENGTH_OFFSET);
+            int methodCount = UnsafeUtility.UNSAFE.getInt(methodArrayAddress + ARRAY_LENGTH_OFFSET);
             if (methodCount != expectedMethods.size()) {
                 continue;
             }
@@ -1040,7 +1192,7 @@ public class SeraLegitHook {
             Set<Long> actualMethods = new HashSet<>();
             boolean matches = true;
             for (int index = 0; index < methodCount; index++) {
-                long methodAddress = JDKUtility.UNSAFE.getLong(
+                long methodAddress = UnsafeUtility.UNSAFE.getLong(
                         methodArrayAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES);
                 if (!expectedMethods.contains(methodAddress) || !actualMethods.add(methodAddress)) {
                     matches = false;
@@ -1067,14 +1219,14 @@ public class SeraLegitHook {
         makeAccessible(probe);
         MethodLocation location = locate(probe);
         if (location.codeSize != 2
-                || JDKUtility.UNSAFE.getByte(location.codeAddress) != 0x03
-                || JDKUtility.UNSAFE.getByte(location.codeAddress + 1) != (byte) 0xAC) {
+                || UnsafeUtility.UNSAFE.getByte(location.codeAddress) != 0x03
+                || UnsafeUtility.UNSAFE.getByte(location.codeAddress + 1) != (byte) 0xAC) {
             throw new IllegalStateException("Unsupported HotSpot Method/ConstMethod layout");
         }
     }
 
     private static long klassPointer(Class<?> klass) {
-        return JDKUtility.UNSAFE.getLong(klass, CLASS_KLASS_OFFSET);
+        return UnsafeUtility.UNSAFE.getLong(klass, CLASS_KLASS_OFFSET);
     }
 
     private static long rawJavaMirror(long klassPointer) {
@@ -1082,12 +1234,12 @@ public class SeraLegitHook {
             throw new IllegalStateException("Klass pointer is null");
         }
 
-        long mirrorHandle = JDKUtility.UNSAFE.getLong(klassPointer + KLASS_JAVA_MIRROR_OFFSET);
+        long mirrorHandle = UnsafeUtility.UNSAFE.getLong(klassPointer + KLASS_JAVA_MIRROR_OFFSET);
         if (mirrorHandle == 0L) {
             throw new IllegalStateException("Klass does not contain a java mirror handle");
         }
 
-        long rawMirror = JDKUtility.UNSAFE.getLong(mirrorHandle);
+        long rawMirror = UnsafeUtility.UNSAFE.getLong(mirrorHandle);
         if (rawMirror == 0L) {
             throw new IllegalStateException("Klass java mirror is null");
         }
@@ -1101,7 +1253,7 @@ public class SeraLegitHook {
 
         synchronized (referenceSlot) {
             try {
-                JDKUtility.UNSAFE.putIntVolatile(
+                UnsafeUtility.UNSAFE.putIntVolatile(
                         referenceSlot, referenceSlotValueOffset, narrowMirror);
                 mirror = referenceSlot.value;
             } finally {
@@ -1140,7 +1292,7 @@ public class SeraLegitHook {
     private static void verifyKlassLayout() {
         long parentKlass = klassPointer(KlassLayoutParent.class);
         long childKlass = klassPointer(KlassLayoutChild.class);
-        long firstChild = JDKUtility.UNSAFE.getLong(parentKlass + KLASS_SUBKLASS_OFFSET);
+        long firstChild = UnsafeUtility.UNSAFE.getLong(parentKlass + KLASS_SUBKLASS_OFFSET);
         if (parentKlass == 0L || childKlass == 0L || firstChild != childKlass) {
             throw new IllegalStateException("Unsupported HotSpot Klass subclass layout");
         }
@@ -1169,7 +1321,7 @@ public class SeraLegitHook {
             try {
                 referenceSlot.value = value;
                 return Integer.toUnsignedLong(
-                        JDKUtility.UNSAFE.getIntVolatile(referenceSlot, referenceSlotValueOffset));
+                        UnsafeUtility.UNSAFE.getIntVolatile(referenceSlot, referenceSlotValueOffset));
             } finally {
                 referenceSlot.value = null;
             }
@@ -1187,9 +1339,9 @@ public class SeraLegitHook {
     private static MethodLocation locate(Executable executable) throws IllegalAccessException {
         MethodHandle methodHandle;
         if (executable instanceof Method method) {
-            methodHandle = JDKUtility.LOOKUP.unreflect(method);
+            methodHandle = UnsafeUtility.TRUSTED_LOOKUP.unreflect(method);
         } else if (executable instanceof Constructor<?> constructor) {
-            methodHandle = JDKUtility.LOOKUP.unreflectConstructor(constructor);
+            methodHandle = UnsafeUtility.TRUSTED_LOOKUP.unreflectConstructor(constructor);
         } else {
             throw new IllegalArgumentException("Unsupported executable " + executable);
         }
@@ -1198,28 +1350,28 @@ public class SeraLegitHook {
                     "Expected DirectMethodHandle, got " + methodHandle.getClass().getName());
         }
 
-        Object member = JDKUtility.UNSAFE.getObject(methodHandle, directMethodHandleMemberOffset);
+        Object member = UnsafeUtility.UNSAFE.getObject(methodHandle, directMethodHandleMemberOffset);
         if (member == null) {
             throw new IllegalStateException("DirectMethodHandle does not contain a MemberName");
         }
 
-        Object resolvedMethod = JDKUtility.UNSAFE.getObject(member, memberNameResolvedMethodOffset);
+        Object resolvedMethod = UnsafeUtility.UNSAFE.getObject(member, memberNameResolvedMethodOffset);
         if (resolvedMethod == null) {
             throw new IllegalStateException("MemberName does not contain a ResolvedMethodName");
         }
 
-        long methodPointer = JDKUtility.UNSAFE.getLong(
+        long methodPointer = UnsafeUtility.UNSAFE.getLong(
                 resolvedMethod, RESOLVED_METHOD_NAME_VMTARGET_OFFSET);
         if (methodPointer == 0L) {
             throw new IllegalStateException("ResolvedMethodName does not contain a Method*");
         }
 
-        long constMethod = JDKUtility.UNSAFE.getLong(methodPointer + METHOD_CONST_METHOD_OFFSET);
+        long constMethod = UnsafeUtility.UNSAFE.getLong(methodPointer + METHOD_CONST_METHOD_OFFSET);
         if (constMethod == 0L) {
             throw new IllegalArgumentException(executable + " has no ConstMethod");
         }
 
-        int codeSize = JDKUtility.UNSAFE.getShort(constMethod + CONST_METHOD_CODE_SIZE_OFFSET)
+        int codeSize = UnsafeUtility.UNSAFE.getShort(constMethod + CONST_METHOD_CODE_SIZE_OFFSET)
                 & 0xFFFF;
         if (codeSize == 0) {
             throw new IllegalArgumentException(executable + " has no Java bytecode");
@@ -1296,3 +1448,5 @@ public class SeraLegitHook {
     }
 
 }
+
+

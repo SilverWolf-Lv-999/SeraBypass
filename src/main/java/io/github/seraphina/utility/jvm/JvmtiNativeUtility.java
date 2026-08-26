@@ -1,4 +1,4 @@
-package io.github.seraphina.utility;
+package io.github.seraphina.utility.jvm;
 
 import com.sun.jna.*;
 import com.sun.jna.ptr.IntByReference;
@@ -7,7 +7,7 @@ import com.sun.jna.ptr.LongByReference;
 import java.util.*;
 
 @SuppressWarnings("all")
-public final class CPPUtility {
+final class JvmtiNativeUtility {
     private static final int POINTER_SIZE = Native.POINTER_SIZE;
     private static final int JVMTI_MAGIC = 0x71EE;
     private static final int[] JVMTI_VERSIONS = {0x30010200, 0x30010100, 0x30010000};
@@ -43,7 +43,7 @@ public final class CPPUtility {
     private static long nextHeadResolveNanos;
     private static boolean initialized;
 
-    public static boolean initializeJvmti() {
+    static boolean initializeJvmti() {
         synchronized (LOCK) {
             if (initialized) return true;
             if (POINTER_SIZE != 8 || !System.getProperty("os.name", "")
@@ -68,17 +68,13 @@ public final class CPPUtility {
         }
     }
 
-    public static int neutralizeAlienEnvironments() {
+    static int neutralizeAlienEnvironments() {
         synchronized (LOCK) {
             return initialized ? sweepChain() : 0;
         }
     }
 
-    public static int neutralizeAlienEnvs() {
-        return neutralizeAlienEnvironments();
-    }
-
-    public static int recoverJvmti() {
+    static int recoverJvmti() {
         synchronized (LOCK) {
             if (!initialized) return 0;
             shieldOwnEnvironment();
@@ -92,11 +88,7 @@ public final class CPPUtility {
         }
     }
 
-    public static int recoverIfTampered() {
-        return recoverJvmti();
-    }
-
-    public static int disarmAlienEnvironments() {
+    static int disarmAlienEnvironments() {
         synchronized (LOCK) {
             if (!initialized) return 0;
             int changed = 0;
@@ -108,17 +100,7 @@ public final class CPPUtility {
         }
     }
 
-    public static int disarmAllAliens() {
-        return disarmAlienEnvironments();
-    }
-
-    public static boolean isJvmtiInitialized() {
-        synchronized (LOCK) {
-            return initialized;
-        }
-    }
-
-    public static void shutdownJvmti() {
+    static void shutdownJvmti() {
         synchronized (LOCK) {
             if (ourJvmtiEnv != null && ownOriginalFunctions != 0) {
                 writePointer(Pointer.nativeValue(ourJvmtiEnv), ownOriginalFunctions);
@@ -563,3 +545,6 @@ public final class CPPUtility {
     private record ChainInspection(int count, boolean reachesTarget) {
     }
 }
+
+
+

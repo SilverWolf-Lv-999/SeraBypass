@@ -2,19 +2,20 @@ package io.github.seraphina;
 
 import com.sun.jna.Native;
 import io.github.seraphina.agent.Agent;
-import io.github.seraphina.utility.JvmUtility;
-import io.github.seraphina.utility.SeraLegitHook;
+import io.github.seraphina.utility.jvm.HotSpotMemoryUtility;
+import io.github.seraphina.utility.jvm.JvmtiUtility;
+import io.github.seraphina.utility.hook.SeraLegitHook;
 
 public class Start {
     public static void main(String[] args) {
         Native.main(args);
-        JvmUtility.peerJVMTI();
+        JvmtiUtility.initializeJvmtiPeer();
         Agent.start(args);
-//        Set<?> allclass = JvmUtility.getAllLoaedClasses();
+//        Set<?> allclass = HotSpotMemoryUtility.getAllLoadedClasses();
 //        for (Object o : allclass) {
 //            System.out.println(o);
 //        }
-//        Set<Object> objects = JvmUtility.getAllLoaedObjects();
+//        Set<Object> objects = HotSpotMemoryUtility.getAllLoadedObjects();
 //        for (Object o : objects) {
 //            System.out.println(o);
 //        }

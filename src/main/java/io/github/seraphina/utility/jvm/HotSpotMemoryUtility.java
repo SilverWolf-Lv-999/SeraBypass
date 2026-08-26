@@ -1,5 +1,6 @@
-package io.github.seraphina.utility;
+package io.github.seraphina.utility.jvm;
 
+import io.github.seraphina.utility.jdk.UnsafeUtility;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import sun.misc.Unsafe;
@@ -8,14 +9,9 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.*;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
-@SuppressWarnings({"all", "removal"})
-public final class JvmUtility {
-    private static final long RECOVERY_PERIOD_MILLIS = 1000L;
-    private static final Object LOCK = new Object();
+@SuppressWarnings("all")
+public final class HotSpotMemoryUtility {
     private static final Logger LOGGER = LogManager.getLogger();
 
     private static final long CLASS_KLASS_OFFSET = 16L;
@@ -27,20 +23,9 @@ public final class JvmUtility {
     private static final long ARRAY_LENGTH_OFFSET_WIDE_KLASS = 16L;
     private static final int MAX_KLASS_COUNT = 1_000_000;
     private static final int MAX_OBJECT_ARRAY_LENGTH = 16_000_000;
-    private static final String PROTECTED_THREAD_PREFIX = "!!!sera&thread_";
-    private static final Object THREAD_PROTECTION_LOCK = new Object();
-
-    private static final Set<Thread> protectedThreads =
-            Collections.newSetFromMap(new IdentityHashMap<>());
-    private static final Set<ThreadGroup> protectedThreadGroups =
-            Collections.newSetFromMap(new IdentityHashMap<>());
-
-    private static ThreadProtectionSecurityManager threadProtectionSecurityManager;
-    private static volatile boolean patched;
-    private static ScheduledExecutorService recoveryExecutor;
     private static volatile HotSpotMemoryLayout memoryLayout;
 
-    public static Set<Class<?>> getAllLoaedClasses() {
+    public static Set<Class<?>> getAllLoadedClasses() {
         HotSpotMemoryLayout layout = memoryLayout();
         LinkedHashSet<Class<?>> classes = new LinkedHashSet<>();
         Set<Long> seenKlasses = new java.util.HashSet<>();
@@ -54,9 +39,9 @@ public final class JvmUtility {
         return classes;
     }
 
-    public static Set<Object> getAllLoaedObjects() {
+    public static Set<Object> getAllLoadedObjects() {
         HotSpotMemoryLayout layout = memoryLayout();
-        Set<Class<?>> classes = getAllLoaedClasses();
+        Set<Class<?>> classes = getAllLoadedClasses();
         Set<Object> objects = Collections.newSetFromMap(new IdentityHashMap<>());
         ArrayDeque<Object> pending = new ArrayDeque<>();
 
@@ -234,7 +219,7 @@ public final class JvmUtility {
         if (current != null) {
             return current;
         }
-        synchronized (JvmUtility.class) {
+        synchronized (HotSpotMemoryUtility.class) {
             current = memoryLayout;
             if (current == null) {
                 current = new HotSpotMemoryLayout();
@@ -249,7 +234,7 @@ public final class JvmUtility {
     }
 
     private static final class HotSpotMemoryLayout {
-        private final Unsafe unsafe = JDKUtility.UNSAFE;
+        private final Unsafe unsafe = UnsafeUtility.UNSAFE;
         private final ReferenceSlot referenceSlot = new ReferenceSlot();
         private final long referenceSlotValueOffset;
         private final boolean compressedOops;
@@ -293,11 +278,11 @@ public final class JvmUtility {
             if (!"17".equals(version)
                     || !(vmName.contains("HotSpot") || vmName.contains("OpenJDK"))) {
                 throw new IllegalStateException(
-                        "JvmUtility memory walkers require JDK 17 HotSpot; found "
+                        "HotSpotMemoryUtility memory walkers require JDK 17 HotSpot; found "
                                 + version + " / " + vmName);
             }
             if (unsafe.addressSize() != Long.BYTES) {
-                throw new IllegalStateException("JvmUtility memory walkers require a 64-bit JVM");
+                throw new IllegalStateException("HotSpotMemoryUtility memory walkers require a 64-bit JVM");
             }
         }
 
@@ -467,176 +452,8 @@ public final class JvmUtility {
         }
     }
 
-    public static void protectThread(Thread thread) {
-        Objects.requireNonNull(thread, "thread");
 
-        synchronized (THREAD_PROTECTION_LOCK) {
-            ensureThreadProtectionSecurityManager();
-            if (protectedThreads.contains(thread)) {
-                return;
-            }
 
-            String threadName = thread.getName();
-            if (threadName.isEmpty()) {
-                threadName = "unnamed";
-            }
-            if (!threadName.startsWith(PROTECTED_THREAD_PREFIX)) {
-                thread.setName(PROTECTED_THREAD_PREFIX + threadName);
-            }
-
-            protectedThreads.add(thread);
-            registerProtectedThreadGroup(thread.getThreadGroup());
-        }
-    }
-
-    private static void ensureThreadProtectionSecurityManager() {
-        SecurityManager securityManager = System.getSecurityManager();
-        if (securityManager == threadProtectionSecurityManager) {
-            return;
-        }
-        if (securityManager != null) {
-            throw new IllegalStateException(
-                    "Could not install the thread protection security manager because one already exists");
-        }
-
-        ThreadProtectionSecurityManager manager = new ThreadProtectionSecurityManager();
-        try {
-            System.setSecurityManager(manager);
-        } catch (SecurityException | UnsupportedOperationException exception) {
-            throw new IllegalStateException(
-                    "Could not install the thread protection security manager", exception);
-        }
-        if (System.getSecurityManager() != manager) {
-            throw new IllegalStateException("Thread protection security manager installation was rejected");
-        }
-        threadProtectionSecurityManager = manager;
-    }
-
-    private static void registerProtectedThreadGroup(ThreadGroup threadGroup) {
-        while (threadGroup != null) {
-            protectedThreadGroups.add(threadGroup);
-            threadGroup = threadGroup.getParent();
-        }
-    }
-
-    private static boolean isProtectedThread(Thread thread) {
-        synchronized (THREAD_PROTECTION_LOCK) {
-            return protectedThreads.contains(thread);
-        }
-    }
-
-    private static boolean isProtectedThreadGroup(ThreadGroup threadGroup) {
-        synchronized (THREAD_PROTECTION_LOCK) {
-            return protectedThreadGroups.contains(threadGroup);
-        }
-    }
-
-    private static boolean isThreadControlInvocation() {
-        for (StackTraceElement element : Thread.currentThread().getStackTrace()) {
-            String className = element.getClassName();
-            if (!Thread.class.getName().equals(className)
-                    && !ThreadGroup.class.getName().equals(className)) {
-                continue;
-            }
-
-            String methodName = element.getMethodName();
-            if ("stop".equals(methodName)
-                    || "suspend".equals(methodName)
-                    || "resume".equals(methodName)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static final class ThreadProtectionSecurityManager extends SecurityManager {
-        @Override
-        public void checkAccess(Thread thread) {
-            if (thread != null && isThreadControlInvocation() && isProtectedThread(thread)) {
-                throw new SecurityException("Protected thread control is denied: " + thread.getName());
-            }
-        }
-
-        @Override
-        public void checkAccess(ThreadGroup threadGroup) {
-            if (threadGroup != null
-                    && isThreadControlInvocation()
-                    && isProtectedThreadGroup(threadGroup)) {
-                throw new SecurityException(
-                        "Protected thread group control is denied: " + threadGroup.getName());
-            }
-        }
-
-        @Override
-        public void checkPermission(java.security.Permission permission) {
-            if (permission instanceof RuntimePermission
-                    && "setSecurityManager".equals(permission.getName())) {
-                throw new SecurityException("Replacing the thread protection security manager is denied");
-            }
-        }
-
-        @Override
-        public void checkPermission(java.security.Permission permission, Object context) {
-            checkPermission(permission);
-        }
-    }
-
-    public static void peerJVMTI() {
-        synchronized (LOCK) {
-            if (patched) {
-                return;
-            }
-            if (!CPPUtility.initializeJvmti()) {
-                LOGGER.debug("Could not initialize the Java JVMTI peer neutralizer");
-                return;
-            }
-
-            CPPUtility.neutralizeAlienEnvironments();
-            CPPUtility.disarmAlienEnvironments();
-            CPPUtility.recoverJvmti();
-            CPPUtility.disarmAlienEnvironments();
-
-            patched = true;
-            recoveryExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "ninecun-lingtai-jvmti-recovery");
-                thread.setDaemon(true);
-                return thread;
-            });
-            recoveryExecutor.scheduleWithFixedDelay(
-                    JvmUtility::recoverJvmti,
-                    RECOVERY_PERIOD_MILLIS,
-                    RECOVERY_PERIOD_MILLIS,
-                    TimeUnit.MILLISECONDS
-            );
-            LOGGER.info("Java JVMTI peer neutralizer initialized");
-        }
-    }
-
-    public static boolean isJvmtiPatched() {
-        return patched;
-    }
-
-    public static void shutdownJvmti() {
-        synchronized (LOCK) {
-            patched = false;
-            if (recoveryExecutor != null) {
-                recoveryExecutor.shutdownNow();
-                recoveryExecutor = null;
-            }
-            CPPUtility.shutdownJvmti();
-        }
-    }
-
-    private static void recoverJvmti() {
-        if (!patched) {
-            return;
-        }
-        try {
-            if (CPPUtility.recoverJvmti() > 0) {
-                CPPUtility.disarmAlienEnvironments();
-            }
-        } catch (Throwable throwable) {
-            LOGGER.debug("JVMTI peer neutralizer recovery failed", throwable);
-        }
-    }
 }
+
+
