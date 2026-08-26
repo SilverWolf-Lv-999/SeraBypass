@@ -4,6 +4,7 @@ import io.github.seraphina.agent.api.SeraTransImpl;
 
 import java.lang.instrument.IllegalClassFormatException;
 import java.security.ProtectionDomain;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -12,6 +13,10 @@ public final class Agent {
     private static final AtomicBoolean onStart = new AtomicBoolean(false);
 
     public static final Set<SeraTransImpl> transformers = new CopyOnWriteArraySet<>();
+
+    public static void reg(SeraTransImpl... seraTransImpl) {
+        transformers.addAll(List.of(seraTransImpl));
+    }
 
     public static synchronized void start(String[] args) {
         attach();

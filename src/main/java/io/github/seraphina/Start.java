@@ -2,6 +2,7 @@ package io.github.seraphina;
 
 import com.sun.jna.Native;
 import io.github.seraphina.agent.Agent;
+import io.github.seraphina.agent.impl.TestSeraTrans;
 import io.github.seraphina.utility.jvm.HotSpotMemoryUtility;
 import io.github.seraphina.utility.jvm.JvmtiUtility;
 import io.github.seraphina.utility.hook.SeraLegitHook;
@@ -22,6 +23,7 @@ public class Start {
         System.out.println(a());
         SeraLegitHook.hookMethod(Start.class, "a", 0);
         System.out.println(a());
+        Agent.reg(new TestSeraTrans());
     }
 
     public static int a() {
