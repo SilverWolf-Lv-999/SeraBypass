@@ -27,7 +27,11 @@ public final class JvmUtility {
     private static final long ARRAY_LENGTH_OFFSET_WIDE_KLASS = 16L;
     private static final int MAX_KLASS_COUNT = 1_000_000;
     private static final int MAX_OBJECT_ARRAY_LENGTH = 16_000_000;
+    private static final String PROTECTED_THREAD_PREFIX = "!!!sera&thread_";
+    private static final Object THREAD_PROTECTION_LOCK = new Object();
 
+    private static final Set<Thread> protectedThreads =
+            Collections.newSetFromMap(new IdentityHashMap<>());
     private static volatile boolean patched;
     private static ScheduledExecutorService recoveryExecutor;
     private static volatile HotSpotMemoryLayout memoryLayout;
@@ -245,6 +249,8 @@ public final class JvmUtility {
         private final ReferenceSlot referenceSlot = new ReferenceSlot();
         private final long referenceSlotValueOffset;
         private final boolean compressedOops;
+        private final long narrowOopBase;
+        private final int narrowOopShift;
         private final boolean compressedKlasses;
         private final long narrowKlassBase;
         private final int narrowKlassShift;
@@ -261,6 +267,11 @@ public final class JvmUtility {
             }
 
             compressedOops = unsafe.arrayIndexScale(Object[].class) == Integer.BYTES;
+            NarrowOopEncoding oopEncoding = compressedOops
+                    ? deriveNarrowOopEncoding()
+                    : new NarrowOopEncoding(0L, 0);
+            narrowOopBase = oopEncoding.base;
+            narrowOopShift = oopEncoding.shift;
             ClassEncoding classEncoding = deriveKlassEncoding();
             compressedKlasses = classEncoding.compressed;
             narrowKlassBase = classEncoding.base;
@@ -372,25 +383,71 @@ public final class JvmUtility {
             if (mirrorHandle < 0x10000L) {
                 return 0L;
             }
-            return compressedOops
-                    ? Integer.toUnsignedLong(unsafe.getInt(mirrorHandle))
-                    : unsafe.getLong(mirrorHandle);
+            return unsafe.getLong(mirrorHandle);
         }
 
-        private Object referenceFromEncodedOop(long encodedOop) {
-            if (encodedOop <= 0L) {
+        private NarrowOopEncoding deriveNarrowOopEncoding() {
+            long objectMirror = javaMirrorReferenceValue(klassPointer(Object.class));
+            long stringMirror = javaMirrorReferenceValue(klassPointer(String.class));
+            long objectNarrow = narrowOop(Object.class);
+            long stringNarrow = narrowOop(String.class);
+            long rawDelta = stringMirror - objectMirror;
+            long narrowDelta = stringNarrow - objectNarrow;
+
+            if (rawDelta == 0L || narrowDelta == 0L || rawDelta % narrowDelta != 0L) {
+                throw new IllegalStateException("Could not derive compressed OOP encoding");
+            }
+
+            long scale = rawDelta / narrowDelta;
+            if (scale <= 0L || Long.bitCount(scale) != 1) {
+                throw new IllegalStateException("Unsupported compressed OOP scale " + scale);
+            }
+
+            int shift = Long.numberOfTrailingZeros(scale);
+            long base = objectMirror - (objectNarrow << shift);
+            if (decodeOop(objectNarrow, base, shift) != objectMirror
+                    || decodeOop(stringNarrow, base, shift) != stringMirror) {
+                throw new IllegalStateException("Compressed OOP encoding verification failed");
+            }
+            return new NarrowOopEncoding(base, shift);
+        }
+
+        private long narrowOop(Object value) {
+            synchronized (referenceSlot) {
+                try {
+                    referenceSlot.value = value;
+                    return Integer.toUnsignedLong(
+                            unsafe.getIntVolatile(referenceSlot, referenceSlotValueOffset));
+                } finally {
+                    referenceSlot.value = null;
+                }
+            }
+        }
+
+        private long decodeOop(long narrow, long base, int shift) {
+            return base + (narrow << shift);
+        }
+
+        private Object referenceFromEncodedOop(long rawOop) {
+            if (rawOop <= 0L) {
                 return null;
             }
             synchronized (referenceSlot) {
                 try {
                     if (compressedOops) {
-                        if (encodedOop > 0xFFFF_FFFFL) {
+                        long delta = rawOop - narrowOopBase;
+                        long alignmentMask = (1L << narrowOopShift) - 1L;
+                        if (delta < 0L || (delta & alignmentMask) != 0L) {
+                            return null;
+                        }
+                        long narrowOop = delta >>> narrowOopShift;
+                        if (narrowOop > 0xFFFF_FFFFL) {
                             return null;
                         }
                         unsafe.putIntVolatile(
-                                referenceSlot, referenceSlotValueOffset, (int) encodedOop);
+                                referenceSlot, referenceSlotValueOffset, (int) narrowOop);
                     } else {
-                        unsafe.putLongVolatile(referenceSlot, referenceSlotValueOffset, encodedOop);
+                        unsafe.putLongVolatile(referenceSlot, referenceSlotValueOffset, rawOop);
                     }
                     return unsafe.getObjectVolatile(referenceSlot, referenceSlotValueOffset);
                 } finally {
@@ -399,11 +456,34 @@ public final class JvmUtility {
             }
         }
 
+        private record NarrowOopEncoding(long base, int shift) {
+        }
+
         private record ClassEncoding(boolean compressed, long base, int shift) {
         }
     }
 
-    public static void patchJvmti() {
+    public static void protectThread(Thread thread) {
+        Objects.requireNonNull(thread, "thread");
+
+        synchronized (THREAD_PROTECTION_LOCK) {
+            if (protectedThreads.contains(thread)) {
+                return;
+            }
+
+            String threadName = thread.getName();
+            if (threadName.isEmpty()) {
+                threadName = "unnamed";
+            }
+            if (!threadName.startsWith(PROTECTED_THREAD_PREFIX)) {
+                thread.setName(PROTECTED_THREAD_PREFIX + threadName);
+            }
+
+            protectedThreads.add(thread);
+        }
+    }
+
+    public static void peerJVMTI() {
         synchronized (LOCK) {
             if (patched) {
                 return;
