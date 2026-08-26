@@ -12,7 +12,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-@SuppressWarnings("all")
+@SuppressWarnings({"all", "removal"})
 public final class JvmUtility {
     private static final long RECOVERY_PERIOD_MILLIS = 1000L;
     private static final Object LOCK = new Object();
@@ -32,6 +32,10 @@ public final class JvmUtility {
 
     private static final Set<Thread> protectedThreads =
             Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<ThreadGroup> protectedThreadGroups =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+
+    private static ThreadProtectionSecurityManager threadProtectionSecurityManager;
     private static volatile boolean patched;
     private static ScheduledExecutorService recoveryExecutor;
     private static volatile HotSpotMemoryLayout memoryLayout;
@@ -467,6 +471,7 @@ public final class JvmUtility {
         Objects.requireNonNull(thread, "thread");
 
         synchronized (THREAD_PROTECTION_LOCK) {
+            ensureThreadProtectionSecurityManager();
             if (protectedThreads.contains(thread)) {
                 return;
             }
@@ -480,6 +485,99 @@ public final class JvmUtility {
             }
 
             protectedThreads.add(thread);
+            registerProtectedThreadGroup(thread.getThreadGroup());
+        }
+    }
+
+    private static void ensureThreadProtectionSecurityManager() {
+        SecurityManager securityManager = System.getSecurityManager();
+        if (securityManager == threadProtectionSecurityManager) {
+            return;
+        }
+        if (securityManager != null) {
+            throw new IllegalStateException(
+                    "Could not install the thread protection security manager because one already exists");
+        }
+
+        ThreadProtectionSecurityManager manager = new ThreadProtectionSecurityManager();
+        try {
+            System.setSecurityManager(manager);
+        } catch (SecurityException | UnsupportedOperationException exception) {
+            throw new IllegalStateException(
+                    "Could not install the thread protection security manager", exception);
+        }
+        if (System.getSecurityManager() != manager) {
+            throw new IllegalStateException("Thread protection security manager installation was rejected");
+        }
+        threadProtectionSecurityManager = manager;
+    }
+
+    private static void registerProtectedThreadGroup(ThreadGroup threadGroup) {
+        while (threadGroup != null) {
+            protectedThreadGroups.add(threadGroup);
+            threadGroup = threadGroup.getParent();
+        }
+    }
+
+    private static boolean isProtectedThread(Thread thread) {
+        synchronized (THREAD_PROTECTION_LOCK) {
+            return protectedThreads.contains(thread);
+        }
+    }
+
+    private static boolean isProtectedThreadGroup(ThreadGroup threadGroup) {
+        synchronized (THREAD_PROTECTION_LOCK) {
+            return protectedThreadGroups.contains(threadGroup);
+        }
+    }
+
+    private static boolean isThreadControlInvocation() {
+        for (StackTraceElement element : Thread.currentThread().getStackTrace()) {
+            String className = element.getClassName();
+            if (!Thread.class.getName().equals(className)
+                    && !ThreadGroup.class.getName().equals(className)) {
+                continue;
+            }
+
+            String methodName = element.getMethodName();
+            if ("stop".equals(methodName)
+                    || "suspend".equals(methodName)
+                    || "resume".equals(methodName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static final class ThreadProtectionSecurityManager extends SecurityManager {
+        @Override
+        public void checkAccess(Thread thread) {
+            if (thread != null && isThreadControlInvocation() && isProtectedThread(thread)) {
+                throw new SecurityException("Protected thread control is denied: " + thread.getName());
+            }
+        }
+
+        @Override
+        public void checkAccess(ThreadGroup threadGroup) {
+            if (threadGroup != null
+                    && isThreadControlInvocation()
+                    && isProtectedThreadGroup(threadGroup)) {
+                throw new SecurityException(
+                        "Protected thread group control is denied: " + threadGroup.getName());
+            }
+        }
+
+        @Override
+        public void checkPermission(java.security.Permission permission) {
+            if (permission instanceof RuntimePermission
+                    && "setSecurityManager".equals(permission.getName())) {
+                throw new SecurityException("Replacing the thread protection security manager is denied");
+            }
+        }
+
+        @Override
+        public void checkPermission(java.security.Permission permission, Object context) {
+            checkPermission(permission);
         }
     }
 
