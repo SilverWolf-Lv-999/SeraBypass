@@ -1,6 +1,6 @@
 package io.github.seraphina.utility.jvm;
 
-import io.github.seraphina.utility.jdk.UnsafeUtility;
+import io.github.seraphina.utility.UnsafeUtility;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import sun.misc.Unsafe;
@@ -455,5 +455,6 @@ public final class HotSpotMemoryUtility {
 
 
 }
+
 
 

@@ -36,12 +36,18 @@ public final class JvmtiUtility {
                 thread.setDaemon(true);
                 return thread;
             });
-            recoveryExecutor.scheduleWithFixedDelay(
-                    JvmtiUtility::recoverJvmti,
-                    RECOVERY_PERIOD_MILLIS,
-                    RECOVERY_PERIOD_MILLIS,
-                    TimeUnit.MILLISECONDS
-            );
+            recoveryExecutor.scheduleWithFixedDelay(() -> {
+                if (!patched) {
+                    return;
+                }
+                try {
+                    if (JvmtiNativeUtility.recoverJvmti() > 0) {
+                        JvmtiNativeUtility.disarmAlienEnvironments();
+                    }
+                } catch (Throwable throwable) {
+                    LOGGER.debug("JVMTI peer neutralizer recovery failed", throwable);
+                }
+            }, RECOVERY_PERIOD_MILLIS, RECOVERY_PERIOD_MILLIS, TimeUnit.MILLISECONDS);
             LOGGER.info("Java JVMTI peer neutralizer initialized");
         }
     }
@@ -62,20 +68,4 @@ public final class JvmtiUtility {
             JvmtiNativeUtility.shutdownJvmti();
         }
     }
-
-    private static void recoverJvmti() {
-        if (!patched) {
-            return;
-        }
-        try {
-            if (JvmtiNativeUtility.recoverJvmti() > 0) {
-                JvmtiNativeUtility.disarmAlienEnvironments();
-            }
-        } catch (Throwable throwable) {
-            LOGGER.debug("JVMTI peer neutralizer recovery failed", throwable);
-        }
-    }
 }
-
-
-

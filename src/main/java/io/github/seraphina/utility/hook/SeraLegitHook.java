@@ -1,6 +1,6 @@
 package io.github.seraphina.utility.hook;
 
-import io.github.seraphina.utility.jdk.UnsafeUtility;
+import io.github.seraphina.utility.UnsafeUtility;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -102,7 +102,18 @@ public class SeraLegitHook {
         synchronized (SeraLegitHook.class) {
             initialize();
             Method targetMethod = findMethodInHierarchy(klass, methodName, new Class<?>[0]);
-            validateInstanceVoidHookTarget(klass, methodName, targetMethod);
+            if (targetMethod == null) {
+                throw new IllegalArgumentException(
+                        "No no-argument method " + methodName + " on " + klass.getName());
+            }
+            if (Modifier.isStatic(targetMethod.getModifiers())
+                    || Modifier.isAbstract(targetMethod.getModifiers())
+                    || Modifier.isNative(targetMethod.getModifiers())
+                    || targetMethod.getReturnType() != void.class) {
+                throw new IllegalArgumentException(
+                        "Instance void hook requires a non-native instance method returning void: "
+                                + targetMethod);
+            }
 
             String callbackId = Long.toUnsignedString(
                     NEXT_INJECTED_METHOD_ID.incrementAndGet(), Character.MAX_RADIX);
@@ -118,7 +129,14 @@ public class SeraLegitHook {
                 INJECTED_METHODS.put(callbackId, new InjectedMethod(donorClass, 0L));
             } catch (Throwable throwable) {
                 INJECTED_INSTANCE_METHOD_BODIES.remove(callbackId);
-                throw instanceMethodHookFailure(klass, methodName, throwable);
+                if (throwable instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                if (throwable instanceof Error error) {
+                    throw error;
+                }
+                throw new IllegalStateException(
+                        "Could not hook " + klass.getName() + "." + methodName + "()", throwable);
             }
         }
     }
@@ -179,7 +197,21 @@ public class SeraLegitHook {
 
         synchronized (SeraLegitHook.class) {
             initialize();
-            validateAddMethodTarget(klass, methodName);
+            if (klass.isArray() || klass.isPrimitive() || klass.isInterface()
+                    || Modifier.isAbstract(klass.getModifiers())) {
+                throw new IllegalArgumentException(
+                        "addMethod requires a concrete class: " + klass.getTypeName());
+            }
+            if (!isAsciiJavaIdentifier(methodName)) {
+                throw new IllegalArgumentException(
+                        "Method name must be an ASCII Java identifier: " + methodName);
+            }
+            try {
+                klass.getDeclaredMethod(methodName);
+                throw new IllegalArgumentException(
+                        klass.getName() + " already declares " + methodName + "()");
+            } catch (NoSuchMethodException ignored) {
+            }
 
             String callbackId = Long.toUnsignedString(
                     NEXT_INJECTED_METHOD_ID.incrementAndGet(), Character.MAX_RADIX);
@@ -249,15 +281,6 @@ public class SeraLegitHook {
         }
     }
 
-    /**
-     * Removes a declared no-argument static method from a loaded class by
-     * replacing its HotSpot InstanceKlass::_methods array in native memory.
-     *
-     * <p>Virtual methods are intentionally rejected: removing one also
-     * requires rebuilding the class and subclass vtables, while the static
-     * method operation is deterministic and does not leave a stale dispatch
-     * slot behind.</p>
-     */
     public static void removeMethod(Class<?> klass, String methodName, Class<?>... parameterTypes) {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(methodName, "methodName");
@@ -318,16 +341,6 @@ public class SeraLegitHook {
         }
     }
 
-    /**
-     * Adds a static reflection field by creating a second field descriptor for
-     * an existing static storage slot. The new field and its backing field
-     * therefore share the same value. This is the only safe schema extension
-     * that can be performed on an already allocated HotSpot class mirror.
-     *
-     * <p>The target class must already contain UTF-8 constants for the new
-     * field name and the backing field descriptor. Class bytecode transformed
-     * before definition has no such restriction.</p>
-     */
     public static void addStaticField(
             Class<?> klass, String fieldName, String backingFieldName, int modifiers) {
         Objects.requireNonNull(klass, "klass");
@@ -336,9 +349,21 @@ public class SeraLegitHook {
 
         synchronized (SeraLegitHook.class) {
             initialize();
-            validateFieldName(fieldName);
-            validateStaticFieldModifiers(modifiers);
-            ensureDeclaredFieldAbsent(klass, fieldName);
+            if (!isAsciiJavaIdentifier(fieldName)) {
+                throw new IllegalArgumentException(
+                        "Field name must be an ASCII Java identifier: " + fieldName);
+            }
+            validateFieldModifiers(modifiers);
+            if (!Modifier.isStatic(modifiers)) {
+                throw new IllegalArgumentException("An added live field must be static");
+            }
+            try {
+                klass.getDeclaredField(fieldName);
+                throw new IllegalArgumentException(
+                        klass.getName() + " already declares field " + fieldName);
+            } catch (NoSuchFieldException ignored) {
+                // The requested field name is available.
+            }
 
             Field backingField = requireDeclaredField(klass, backingFieldName);
             if (!Modifier.isStatic(backingField.getModifiers())) {
@@ -364,21 +389,12 @@ public class SeraLegitHook {
         }
     }
 
-    /**
-     * Removes one declared field from HotSpot's InstanceKlass field metadata.
-     * Existing compiled code and stale {@link Field} instances must not be
-     * used afterwards; the operation is intended for reflection-visible
-     * transformer changes on a live class.
-     */
     public static void removeField(Class<?> klass, String fieldName) {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(fieldName, "fieldName");
 
         synchronized (SeraLegitHook.class) {
             initialize();
-            // A pending <clinit> may still execute putstatic/getstatic for this
-            // field. Finish it before removing the metadata entry so the class
-            // cannot subsequently fail initialization with NoSuchFieldError.
             ensureClassInitialized(klass);
             Field targetField = requireDeclaredField(klass, fieldName);
             long originalFieldsAddress = fieldArrayAddress(klass);
@@ -394,11 +410,6 @@ public class SeraLegitHook {
         }
     }
 
-    /**
-     * Replaces the Java visibility and field modifier bits of a declared
-     * field while preserving HotSpot-specific field flags and its storage
-     * offset.
-     */
     public static void modifyFieldModifiers(Class<?> klass, String fieldName, int modifiers) {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(fieldName, "fieldName");
@@ -441,90 +452,25 @@ public class SeraLegitHook {
         methodBody.run();
     }
 
-    private static void validateInstanceVoidHookTarget(
-            Class<?> klass, String methodName, Method targetMethod) {
-        if (targetMethod == null) {
-            throw new IllegalArgumentException(
-                    "No no-argument method " + methodName + " on " + klass.getName());
-        }
-        if (Modifier.isStatic(targetMethod.getModifiers())
-                || Modifier.isAbstract(targetMethod.getModifiers())
-                || Modifier.isNative(targetMethod.getModifiers())
-                || targetMethod.getReturnType() != void.class) {
-            throw new IllegalArgumentException(
-                    "Instance void hook requires a non-native instance method returning void: "
-                            + targetMethod);
-        }
-    }
 
-    private static RuntimeException instanceMethodHookFailure(
-            Class<?> klass, String methodName, Throwable throwable) {
-        if (throwable instanceof RuntimeException runtimeException) {
-            return runtimeException;
-        }
-        if (throwable instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException(
-                "Could not hook " + klass.getName() + "." + methodName + "()", throwable);
-    }
-
-    private static void validateAddMethodTarget(Class<?> klass, String methodName) {
-        if (klass.isArray() || klass.isPrimitive() || klass.isInterface()
-                || Modifier.isAbstract(klass.getModifiers())) {
-            throw new IllegalArgumentException(
-                    "addMethod requires a concrete class: " + klass.getTypeName());
-        }
-        if (!isAsciiJavaIdentifier(methodName)) {
-            throw new IllegalArgumentException(
-                    "Method name must be an ASCII Java identifier: " + methodName);
-        }
-
-        try {
-            klass.getDeclaredMethod(methodName);
-            throw new IllegalArgumentException(
-                    klass.getName() + " already declares " + methodName + "()");
-        } catch (NoSuchMethodException ignored) {
-            // The requested signature is free.
-        }
-    }
 
     private static boolean isAsciiJavaIdentifier(String value) {
-        if (value.isEmpty() || !isAsciiJavaIdentifierStart(value.charAt(0))) {
+        if (value.isEmpty()) {
             return false;
         }
 
-        for (int index = 1; index < value.length(); index++) {
-            if (!isAsciiJavaIdentifierPart(value.charAt(index))) {
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            boolean letter = character >= 'A' && character <= 'Z'
+                    || character >= 'a' && character <= 'z';
+            if (!letter && character != '_' && character != '$'
+                    && (index == 0 || character < '0' || character > '9')) {
                 return false;
             }
         }
         return true;
     }
 
-    private static boolean isAsciiJavaIdentifierStart(char value) {
-        return value >= 'A' && value <= 'Z'
-                || value >= 'a' && value <= 'z'
-                || value == '_' || value == '$';
-    }
-
-    private static boolean isAsciiJavaIdentifierPart(char value) {
-        return isAsciiJavaIdentifierStart(value) || value >= '0' && value <= '9';
-    }
-
-    private static void validateFieldName(String fieldName) {
-        if (!isAsciiJavaIdentifier(fieldName)) {
-            throw new IllegalArgumentException(
-                    "Field name must be an ASCII Java identifier: " + fieldName);
-        }
-    }
-
-    private static void validateStaticFieldModifiers(int modifiers) {
-        validateFieldModifiers(modifiers);
-        if (!Modifier.isStatic(modifiers)) {
-            throw new IllegalArgumentException("An added live field must be static");
-        }
-    }
 
     private static void validateFieldModifiers(int modifiers) {
         if ((modifiers & ~HOTSPOT_FIELD_MODIFIER_MASK) != 0) {
@@ -540,15 +486,6 @@ public class SeraLegitHook {
         }
     }
 
-    private static void ensureDeclaredFieldAbsent(Class<?> klass, String fieldName) {
-        try {
-            klass.getDeclaredField(fieldName);
-            throw new IllegalArgumentException(
-                    klass.getName() + " already declares field " + fieldName);
-        } catch (NoSuchFieldException ignored) {
-            // The requested field name is available.
-        }
-    }
 
     private static Field requireDeclaredField(Class<?> klass, String fieldName) {
         try {
@@ -583,16 +520,18 @@ public class SeraLegitHook {
 
     private static int findFieldIndex(Class<?> klass, long fieldsAddress, Field field) {
         int fieldSlots = fieldArrayLength(fieldsAddress);
+        Object constantPool = constantPool(klass);
         String descriptor = descriptor(field.getType());
         for (int fieldIndex = 0; fieldIndex < fieldSlots / FIELD_SLOTS; fieldIndex++) {
             String candidateName = constantPoolUtf8At(
-                    klass, unsignedShort(readFieldInfo(fieldsAddress, fieldIndex, FIELD_NAME_INDEX_OFFSET)));
+                    constantPool,
+                    unsignedShort(readFieldInfo(fieldsAddress, fieldIndex, FIELD_NAME_INDEX_OFFSET)));
             if (!field.getName().equals(candidateName)) {
                 continue;
             }
 
             String candidateDescriptor = constantPoolUtf8At(
-                    klass,
+                    constantPool,
                     unsignedShort(readFieldInfo(
                             fieldsAddress, fieldIndex, FIELD_SIGNATURE_INDEX_OFFSET)));
             if (descriptor.equals(candidateDescriptor)) {
@@ -803,9 +742,6 @@ public class SeraLegitHook {
                         + " does not contain the UTF-8 constant " + value);
     }
 
-    private static String constantPoolUtf8At(Class<?> klass, int index) {
-        return constantPoolUtf8At(constantPool(klass), index);
-    }
 
     private static Object constantPool(Class<?> klass) {
         try {
@@ -2198,5 +2134,8 @@ public class SeraLegitHook {
     }
 
 }
+
+
+
 
 
