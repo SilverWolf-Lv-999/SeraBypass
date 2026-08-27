@@ -1,7 +1,8 @@
 use core::ptr;
 
 use jni_sys::{
-    JNIEnv, jboolean, jclass, jint, jmethodID, jobject, jobjectArray, jsize, jstring, jvalue,
+    JNIEnv, jboolean, jbyteArray, jclass, jint, jmethodID, jobject, jobjectArray, jsize, jstring,
+    jvalue,
 };
 
 const JNCT_CLASS_NAME: &[u8] = b"io/github/seraphina/jnct/JNCT\0";
@@ -15,7 +16,8 @@ const LOAD_CLASS_METHOD_DESCRIPTOR: &[u8] = b"(Ljava/lang/String;)Ljava/lang/Cla
 const GET_CLASS_LOADER_METHOD_NAME: &[u8] = b"getClassLoader\0";
 const GET_CLASS_LOADER_METHOD_DESCRIPTOR: &[u8] = b"()Ljava/lang/ClassLoader;\0";
 const GET_RESOURCE_AS_STREAM_METHOD_NAME: &[u8] = b"getResourceAsStream\0";
-const GET_RESOURCE_AS_STREAM_METHOD_DESCRIPTOR: &[u8] = b"(Ljava/lang/String;)Ljava/io/InputStream;\0";
+const GET_RESOURCE_AS_STREAM_METHOD_DESCRIPTOR: &[u8] =
+    b"(Ljava/lang/String;)Ljava/io/InputStream;\0";
 const STRING_REPLACE_METHOD_NAME: &[u8] = b"replace\0";
 const STRING_REPLACE_METHOD_DESCRIPTOR: &[u8] = b"(CC)Ljava/lang/String;\0";
 const STRING_CONCAT_METHOD_NAME: &[u8] = b"concat\0";
@@ -26,11 +28,22 @@ const CLOSE_METHOD_NAME: &[u8] = b"close\0";
 const CLOSE_METHOD_DESCRIPTOR: &[u8] = b"()V\0";
 const INITIALIZER_METHOD_NAME: &[u8] = b"<init>\0";
 const INITIALIZER_METHOD_DESCRIPTOR: &[u8] = b"()V\0";
-const DEFINE_CLASS_METHOD_NAME: &[u8] = b"defineClass0\0";
-const DEFINE_CLASS_METHOD_DESCRIPTOR: &[u8] = b"(Ljava/lang/ClassLoader;Ljava/lang/Class;Ljava/lang/String;[BIILjava/security/ProtectionDomain;ZILjava/lang/Object;)Ljava/lang/Class;\0";
 
 const CLASS_FILE_SUFFIX: &[u8] = b".class\0";
 const RESOURCE_ROOT: &[u8] = b"/\0";
+
+const JAVA_DLL_NAME: &[u16] = &[
+    b'j' as u16,
+    b'a' as u16,
+    b'v' as u16,
+    b'a' as u16,
+    b'.' as u16,
+    b'd' as u16,
+    b'l' as u16,
+    b'l' as u16,
+    0,
+];
+const DEFINE_CLASS0_SYMBOL: &[u8] = b"Java_java_lang_ClassLoader_defineClass0\0";
 
 const HIDDEN_CLASS_FLAG: jint = 2;
 const STRONG_HIDDEN_CLASS_FLAG: jint = 4;
@@ -43,6 +56,30 @@ const ERROR_CLASS_DEFINITION: &[u8] = b"Unable to define the hidden class\0";
 const ERROR_INSTANCE_CREATION: &[u8] = b"Unable to construct the hidden class\0";
 
 const LOCAL_REFERENCE_CAPACITY: usize = 24;
+
+type DefineClass0 = unsafe extern "system" fn(
+    environment: *mut JNIEnv,
+    class_loader_class: jclass,
+    loader: jobject,
+    lookup: jclass,
+    name: jstring,
+    bytes: jbyteArray,
+    offset: jint,
+    length: jint,
+    protection_domain: jobject,
+    initialize: jboolean,
+    flags: jint,
+    class_data: jobject,
+) -> jclass;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetModuleHandleW(module_name: *const u16) -> *mut core::ffi::c_void;
+    fn GetProcAddress(
+        module: *mut core::ffi::c_void,
+        procedure_name: *const u8,
+    ) -> *mut core::ffi::c_void;
+}
 
 #[derive(Clone, Copy)]
 enum HiddenClassError {
@@ -176,9 +213,8 @@ unsafe fn define_hidden_class_instance_inner(
         return Err(HiddenClassError::InvalidArguments);
     }
 
-    let string_class = unsafe {
-        local_references.add(find_class(environment, STRING_CLASS_NAME).cast())
-    };
+    let string_class =
+        unsafe { local_references.add(find_class(environment, STRING_CLASS_NAME).cast()) };
     if string_class.is_null() || unsafe { has_pending_exception(environment) } {
         return Err(HiddenClassError::ClassLoading);
     }
@@ -189,12 +225,10 @@ unsafe fn define_hidden_class_instance_inner(
         return Err(HiddenClassError::InvalidArguments);
     }
 
-    let class_class = unsafe {
-        local_references.add(find_class(environment, CLASS_CLASS_NAME).cast())
-    };
-    let class_loader_class = unsafe {
-        local_references.add(find_class(environment, CLASS_LOADER_CLASS_NAME).cast())
-    };
+    let class_class =
+        unsafe { local_references.add(find_class(environment, CLASS_CLASS_NAME).cast()) };
+    let class_loader_class =
+        unsafe { local_references.add(find_class(environment, CLASS_LOADER_CLASS_NAME).cast()) };
     if class_class.is_null()
         || class_loader_class.is_null()
         || unsafe { has_pending_exception(environment) }
@@ -240,13 +274,7 @@ unsafe fn define_hidden_class_instance_inner(
         return Err(HiddenClassError::InvalidArguments);
     }
     if !requested_loader.is_null()
-        && !unsafe {
-            is_instance_of(
-                environment,
-                requested_loader,
-                class_loader_class.cast(),
-            )
-        }
+        && !unsafe { is_instance_of(environment, requested_loader, class_loader_class.cast()) }
     {
         return Err(HiddenClassError::InvalidArguments);
     }
@@ -255,9 +283,8 @@ unsafe fn define_hidden_class_instance_inner(
     }
 
     let effective_loader = if requested_loader.is_null() {
-        let jnct_class = unsafe {
-            local_references.add(find_class(environment, JNCT_CLASS_NAME).cast())
-        };
+        let jnct_class =
+            unsafe { local_references.add(find_class(environment, JNCT_CLASS_NAME).cast()) };
         if jnct_class.is_null() || unsafe { has_pending_exception(environment) } {
             return Err(HiddenClassError::ClassLoading);
         }
@@ -283,9 +310,7 @@ unsafe fn define_hidden_class_instance_inner(
             environment,
             effective_loader,
             load_class,
-            &[jvalue {
-                l: class_name,
-            }],
+            &[jvalue { l: class_name }],
         ))
     };
     if lookup_class.is_null() || unsafe { has_pending_exception(environment) } {
@@ -329,17 +354,15 @@ unsafe fn define_hidden_class_instance_inner(
             environment,
             class_name,
             replace,
-            &[
-                jvalue { c: b'.' as u16 },
-                jvalue { c: b'/' as u16 },
-            ],
+            &[jvalue { c: b'.' as u16 }, jvalue { c: b'/' as u16 }],
         ))
     };
     if resource_name.is_null() || unsafe { has_pending_exception(environment) } {
         return Err(HiddenClassError::ClassResource);
     }
 
-    let class_file_suffix = unsafe { local_references.add(new_string(environment, CLASS_FILE_SUFFIX).cast()) };
+    let class_file_suffix =
+        unsafe { local_references.add(new_string(environment, CLASS_FILE_SUFFIX).cast()) };
     if class_file_suffix.is_null() || unsafe { has_pending_exception(environment) } {
         return Err(HiddenClassError::ClassResource);
     }
@@ -371,7 +394,8 @@ unsafe fn define_hidden_class_instance_inner(
             return Err(HiddenClassError::ClassResource);
         }
 
-        let resource_root = unsafe { local_references.add(new_string(environment, RESOURCE_ROOT).cast()) };
+        let resource_root =
+            unsafe { local_references.add(new_string(environment, RESOURCE_ROOT).cast()) };
         if resource_root.is_null() || unsafe { has_pending_exception(environment) } {
             return Err(HiddenClassError::ClassResource);
         }
@@ -423,9 +447,8 @@ unsafe fn define_hidden_class_instance_inner(
         return Err(HiddenClassError::ClassResource);
     }
 
-    let input_stream_class = unsafe {
-        local_references.add(find_class(environment, INPUT_STREAM_CLASS_NAME).cast())
-    };
+    let input_stream_class =
+        unsafe { local_references.add(find_class(environment, INPUT_STREAM_CLASS_NAME).cast()) };
     if input_stream_class.is_null() || unsafe { has_pending_exception(environment) } {
         return Err(HiddenClassError::ClassResource);
     }
@@ -446,7 +469,8 @@ unsafe fn define_hidden_class_instance_inner(
             CLOSE_METHOD_DESCRIPTOR,
         )
     };
-    if read_all_bytes.is_null() || close.is_null() || unsafe { has_pending_exception(environment) } {
+    if read_all_bytes.is_null() || close.is_null() || unsafe { has_pending_exception(environment) }
+    {
         return Err(HiddenClassError::ClassResource);
     }
 
@@ -478,43 +502,20 @@ unsafe fn define_hidden_class_instance_inner(
         return Err(HiddenClassError::ClassResource);
     }
 
-    let define_class = unsafe {
-        get_static_method_id(
-            environment,
-            class_loader_class.cast(),
-            DEFINE_CLASS_METHOD_NAME,
-            DEFINE_CLASS_METHOD_DESCRIPTOR,
-        )
-    };
-    if define_class.is_null() || unsafe { has_pending_exception(environment) } {
-        return Err(HiddenClassError::ClassDefinition);
-    }
-
     let hidden_class = unsafe {
-        local_references.add(call_static_object_method_a(
+        local_references.add(define_class0(
             environment,
             class_loader_class.cast(),
-            define_class,
-            &[
-                jvalue {
-                    l: lookup_loader,
-                },
-                jvalue {
-                    l: lookup_class,
-                },
-                jvalue { l: class_name },
-                jvalue { l: class_bytes },
-                jvalue { i: 0 },
-                jvalue {
-                    i: class_byte_length,
-                },
-                jvalue { l: ptr::null_mut() },
-                jvalue { z: true },
-                jvalue {
-                    i: HIDDEN_CLASS_FLAGS,
-                },
-                jvalue { l: ptr::null_mut() },
-            ],
+            lookup_loader,
+            lookup_class.cast(),
+            class_name.cast(),
+            class_bytes.cast(),
+            0,
+            class_byte_length,
+            ptr::null_mut(),
+            true,
+            HIDDEN_CLASS_FLAGS,
+            ptr::null_mut(),
         ))
     };
     if hidden_class.is_null() || unsafe { has_pending_exception(environment) } {
@@ -568,22 +569,6 @@ unsafe fn get_method_id(
     }
 }
 
-unsafe fn get_static_method_id(
-    environment: *mut JNIEnv,
-    class: jclass,
-    method_name: &[u8],
-    method_descriptor: &[u8],
-) -> jmethodID {
-    unsafe {
-        ((*(*environment)).v1_1.GetStaticMethodID)(
-            environment,
-            class,
-            method_name.as_ptr().cast(),
-            method_descriptor.as_ptr().cast(),
-        )
-    }
-}
-
 unsafe fn call_object_method_a(
     environment: *mut JNIEnv,
     object: jobject,
@@ -596,22 +581,6 @@ unsafe fn call_object_method_a(
         arguments.as_ptr()
     };
     unsafe { ((*(*environment)).v1_1.CallObjectMethodA)(environment, object, method, arguments) }
-}
-
-unsafe fn call_static_object_method_a(
-    environment: *mut JNIEnv,
-    class: jclass,
-    method: jmethodID,
-    arguments: &[jvalue],
-) -> jobject {
-    let arguments = if arguments.is_empty() {
-        ptr::null()
-    } else {
-        arguments.as_ptr()
-    };
-    unsafe {
-        ((*(*environment)).v1_1.CallStaticObjectMethodA)(environment, class, method, arguments)
-    }
 }
 
 unsafe fn call_void_method_a(
@@ -644,6 +613,50 @@ unsafe fn new_object_a(
 
 unsafe fn new_string(environment: *mut JNIEnv, value: &[u8]) -> jstring {
     unsafe { ((*(*environment)).v1_1.NewStringUTF)(environment, value.as_ptr().cast()) }
+}
+
+unsafe fn define_class0(
+    environment: *mut JNIEnv,
+    class_loader_class: jclass,
+    loader: jobject,
+    lookup: jclass,
+    name: jstring,
+    bytes: jbyteArray,
+    offset: jint,
+    length: jint,
+    protection_domain: jobject,
+    initialize: jboolean,
+    flags: jint,
+    class_data: jobject,
+) -> jclass {
+    let java_module = unsafe { GetModuleHandleW(JAVA_DLL_NAME.as_ptr()) };
+    if java_module.is_null() {
+        return ptr::null_mut();
+    }
+
+    let define_class0_address =
+        unsafe { GetProcAddress(java_module, DEFINE_CLASS0_SYMBOL.as_ptr()) };
+    if define_class0_address.is_null() {
+        return ptr::null_mut();
+    }
+
+    let define_class0: DefineClass0 = unsafe { core::mem::transmute(define_class0_address) };
+    unsafe {
+        define_class0(
+            environment,
+            class_loader_class,
+            loader,
+            lookup,
+            name,
+            bytes,
+            offset,
+            length,
+            protection_domain,
+            initialize,
+            flags,
+            class_data,
+        )
+    }
 }
 
 unsafe fn get_array_length(environment: *mut JNIEnv, array: jobject) -> jsize {

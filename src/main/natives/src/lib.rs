@@ -1,12 +1,13 @@
 #![no_std]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(not(test), no_main)]
 
 #[cfg(test)]
 extern crate alloc;
 
+mod klass;
 pub mod log;
 mod peer_jvmti;
-mod klass;
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
@@ -74,6 +75,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[unsafe(no_mangle)]
+#[allow(non_snake_case)]
 pub extern "system" fn DllMain(module: *mut c_void, reason: u32, _: *mut c_void) -> i32 {
     if reason == DLL_PROCESS_ATTACH {
         unsafe {
@@ -212,11 +214,8 @@ unsafe fn wait_for_command_clear(
             return;
         }
 
-        let is_same_command = ((*(*environment)).v1_1.IsSameObject)(
-            environment,
-            command,
-            processed_command,
-        );
+        let is_same_command =
+            ((*(*environment)).v1_1.IsSameObject)(environment, command, processed_command);
         ((*(*environment)).v1_1.DeleteLocalRef)(environment, command);
         if !is_same_command {
             return;
