@@ -35,6 +35,7 @@ const JNCT_ARGS_FIELD_DESCRIPTOR: &[u8] = b"[Ljava/lang/Object;\0";
 const JNCT_RESULT_FIELD_NAME: &[u8] = b"result\0";
 const JNCT_RESULT_FIELD_DESCRIPTOR: &[u8] = b"Ljava/lang/Object;\0";
 const HELLO_COMMAND: &[u8] = b"hello";
+const DEFINE_HIDDEN_CLASS_COMMAND: &[u8] = b"defineHiddenClass";
 const HELLO_RESULT: &[u8] = b"Hello\0";
 const UNKNOWN_COMMAND_RESULT: &[u8] = b"Unknown JNCT command\0";
 const WORKER_SLEEP_MILLIS: u32 = 1;
@@ -156,9 +157,9 @@ unsafe fn process_jnct_command(environment: *mut JNIEnv, fields: &JnctFields) {
     if !arguments.is_null() {
         ((*(*environment)).v1_1.DeleteLocalRef)(environment, arguments);
     }
-    ((*(*environment)).v1_1.DeleteLocalRef)(environment, command);
 
-    wait_for_command_clear(environment, fields);
+    wait_for_command_clear(environment, fields, command);
+    ((*(*environment)).v1_1.DeleteLocalRef)(environment, command);
 }
 
 unsafe fn dispatch_jnct_command(
@@ -174,9 +175,10 @@ unsafe fn dispatch_jnct_command(
     }
 
     let command_length = ((*(*environment)).v1_1.GetStringUTFLength)(environment, command);
-    let is_hello =
-        core::slice::from_raw_parts(command_characters.cast::<u8>(), command_length as usize)
-            == HELLO_COMMAND;
+    let command_bytes =
+        core::slice::from_raw_parts(command_characters.cast::<u8>(), command_length as usize);
+    let is_hello = command_bytes == HELLO_COMMAND;
+    let is_define_hidden_class = command_bytes == DEFINE_HIDDEN_CLASS_COMMAND;
     ((*(*environment)).v1_1.ReleaseStringUTFChars)(environment, command, command_characters);
 
     if is_hello {
@@ -185,12 +187,20 @@ unsafe fn dispatch_jnct_command(
             .cast();
     }
 
+    if is_define_hidden_class {
+        return klass::define_hidden_class_instance(environment, _arguments);
+    }
+
     log::error("Unknown JNCT command");
     ((*(*environment)).v1_1.NewStringUTF)(environment, UNKNOWN_COMMAND_RESULT.as_ptr().cast())
         .cast()
 }
 
-unsafe fn wait_for_command_clear(environment: *mut JNIEnv, fields: &JnctFields) {
+unsafe fn wait_for_command_clear(
+    environment: *mut JNIEnv,
+    fields: &JnctFields,
+    processed_command: jobject,
+) {
     loop {
         let command =
             ((*(*environment)).v1_1.GetStaticObjectField)(environment, fields.class, fields.cmd);
@@ -202,7 +212,16 @@ unsafe fn wait_for_command_clear(environment: *mut JNIEnv, fields: &JnctFields) 
             return;
         }
 
+        let is_same_command = ((*(*environment)).v1_1.IsSameObject)(
+            environment,
+            command,
+            processed_command,
+        );
         ((*(*environment)).v1_1.DeleteLocalRef)(environment, command);
+        if !is_same_command {
+            return;
+        }
+
         Sleep(WORKER_SLEEP_MILLIS);
     }
 }
