@@ -18,11 +18,11 @@ public class Start {
 
     public static void main(String[] args) throws NoSuchMethodException {
         NativeLibrary nativeLibrary = SysUtility.loadNative(SeraBypass.class, SERA_BYPASS_NATIVE_RESOURCE);
-        nativeLibrary.registerNative(
-                SERA_BYPASS_NATIVE_BOOTSTRAP,
-                SeraBypass.class.getDeclaredMethod("nativeSayHello")
-        );
-        SeraBypass.nativeSayHello();
+//        nativeLibrary.registerNative(
+//                SERA_BYPASS_NATIVE_BOOTSTRAP,
+//                SeraBypass.class.getDeclaredMethod("nativeSayHello")
+//        );
+//        SeraBypass.nativeSayHello();
         LOGGER.info("sera_bypass.dll JNI smoke test completed");
 
         Native.main(args);

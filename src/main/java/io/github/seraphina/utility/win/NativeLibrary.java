@@ -49,12 +49,6 @@ public final class NativeLibrary {
         return this.moduleAddress;
     }
 
-    /**
-     * Invokes a DLL-provided JNI registration bootstrap for one native Java method.
-     *
-     * @param bootstrapExport exported function with signature {@code int(char*, char*, char*)}
-     * @param nativeMethod native method that the DLL bootstrap should register
-     */
     public void registerNative(String bootstrapExport, Method nativeMethod) {
         Objects.requireNonNull(nativeMethod, "nativeMethod");
         if (!Modifier.isNative(nativeMethod.getModifiers())) {
@@ -68,13 +62,6 @@ public final class NativeLibrary {
         );
     }
 
-    /**
-     * Invokes a DLL-provided JNI registration bootstrap for one Java native method.
-     *
-     * <p>The bootstrap receives the internal class name, Java method name and JNI descriptor,
-     * then calls {@code RegisterNatives} on the current VM. This keeps the loader independent
-     * from any particular DLL, Java class or method.</p>
-     */
     public void registerNative(
             String bootstrapExport,
             Class<?> nativeClass,
@@ -225,6 +212,7 @@ public final class NativeLibrary {
         }
         descriptor.append('L').append(type.getName().replace('.', '/')).append(';');
     }
+
     private static int getUnsignedShort(long address) {
         return Short.toUnsignedInt(MemoryUtil.memGetShort(address));
     }

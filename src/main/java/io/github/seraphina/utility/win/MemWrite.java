@@ -15,8 +15,7 @@ public final class MemWrite {
     private static final int PAGE_READWRITE = 0x04;
     private static final int PAGE_EXECUTE_READ = 0x20;
     private static final long EXPECTED_RESULT = 0x0123456789ABCDEFL;
-    private static final byte[] EXPECTED_TEXT = "Hello World"
-            .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] EXPECTED_TEXT = "Hello World".getBytes(StandardCharsets.US_ASCII);
 
     private static volatile boolean virtualAllocEntered;
     private static volatile boolean virtualProtectEntered;

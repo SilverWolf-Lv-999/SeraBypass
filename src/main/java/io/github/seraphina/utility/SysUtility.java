@@ -17,53 +17,20 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Java-side native library loading utilities.
- *
- * <p>Libraries are extracted from the caller's resources and mapped through {@link SeraNative}.
- * This utility never uses {@link System#load(String)} or {@link System#loadLibrary(String)}.</p>
- */
 public final class SysUtility {
     private static final Object NATIVE_LOAD_LOCK = new Object();
     private static final Map<Path, NativeLibrary> NATIVE_LIBRARIES = new HashMap<>();
 
     private static volatile Throwable lastNativeLoadFailure;
 
-    private SysUtility() {
-    }
-
-    /**
-     * Loads a native resource owned by this library.
-     *
-     * @param nativeResourcePath classpath resource path of the native library
-     * @return mapped native library
-     */
     public static NativeLibrary loadNative(String nativeResourcePath) {
         return loadNative(SysUtility.class, nativeResourcePath);
     }
 
-    /**
-     * Loads a native resource owned by the supplied class.
-     *
-     * <p>Library consumers should pass a class from their own artifact so the resource is resolved
-     * from the correct class loader.</p>
-     *
-     * @param resourceOwner class whose class loader owns the resource
-     * @param nativeResourcePath classpath resource path of the native library
-     * @return mapped native library
-     */
     public static NativeLibrary loadNative(Class<?> resourceOwner, String nativeResourcePath) {
         return loadNative(resourceOwner, nativeResourcePath, getDefaultNativeDirectory());
     }
 
-    /**
-     * Loads a native resource into a caller-selected extraction directory.
-     *
-     * @param resourceOwner class whose class loader owns the resource
-     * @param nativeResourcePath classpath resource path of the native library
-     * @param nativeDirectory directory used to extract the library
-     * @return mapped native library
-     */
     public static NativeLibrary loadNative(
             Class<?> resourceOwner,
             String nativeResourcePath,
@@ -94,12 +61,6 @@ public final class SysUtility {
         }
     }
 
-    /**
-     * Maps a native library that already exists on disk.
-     *
-     * @param nativePath filesystem path to the native library
-     * @return mapped native library
-     */
     public static NativeLibrary loadNativeFile(Path nativePath) {
         if (nativePath == null) {
             throw new IllegalArgumentException("nativePath must not be null");
