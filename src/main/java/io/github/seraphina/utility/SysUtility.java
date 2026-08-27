@@ -88,8 +88,8 @@ public final class SysUtility {
                 return loadedLibrary;
             }
 
-            long moduleAddress = new SeraNative().IIllII00IIllII(
-                    new WIN32().llIIll01l(),
+            long moduleAddress = new SeraNative().load(
+                    new WIN32().shellcode(),
                     nativePath.toString()
             );
             if (moduleAddress == 0L) {

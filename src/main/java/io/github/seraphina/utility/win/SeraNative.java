@@ -15,7 +15,7 @@ public class SeraNative {
     private static volatile boolean way2VirtualProtectEntered;
     private static volatile boolean way2ShellcodeEntered;
 
-    public long IIllII00IIllII(byte[] shellcode, String dllPath) {
+    public long load(byte[] shellcode, String dllPath) {
 
         try {
             System.out.println("DLL Path: " + dllPath);

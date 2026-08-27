@@ -1,11 +1,16 @@
 #![no_std]
 #![cfg_attr(not(test), no_main)]
 
+#[cfg(test)]
+extern crate alloc;
+
+pub mod log;
+mod peer_jvmti;
+
 use core::ffi::{c_char, c_void};
 use jni_sys::{JNI_ERR, JNI_OK, JNI_VERSION_1_8, JNIEnv, JNINativeMethod, JavaVM, jint, jsize};
 
 const DLL_PROCESS_ATTACH: u32 = 1;
-const STD_OUTPUT_HANDLE: i32 = -11;
 const JVM_DLL_NAME: &[u16] = &[
     b'j' as u16,
     b'v' as u16,
@@ -23,20 +28,9 @@ unsafe extern "system" {
     fn DisableThreadLibraryCalls(module: *mut c_void) -> i32;
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, procedure_name: *const u8) -> *mut c_void;
-    fn GetStdHandle(std_handle: i32) -> *mut c_void;
-    fn WriteFile(
-        handle: *mut c_void,
-        buffer: *const c_void,
-        number_of_bytes_to_write: u32,
-        number_of_bytes_written: *mut u32,
-        overlapped: *mut c_void,
-    ) -> i32;
 }
-
 type JniGetCreatedJavaVms = unsafe extern "system" fn(*mut *mut JavaVM, jsize, *mut jsize) -> jint;
 
-// The Rust test harness links `std`, which supplies its own panic implementation.
-// Keep this handler only in the actual DLL build to avoid duplicate `panic_impl`.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -53,10 +47,6 @@ pub extern "system" fn DllMain(module: *mut c_void, reason: u32, _: *mut c_void)
     1
 }
 
-/// Registers the DLL implementation for one Java native method.
-///
-/// The Java loader supplies the target class, method name and JNI descriptor so this DLL does not
-/// contain a hard-coded dependency on a Java package or API name.
 #[unsafe(no_mangle)]
 pub extern "system" fn sera_bypass_register_natives(
     class_name: *const c_char,
@@ -120,15 +110,5 @@ unsafe fn get_current_environment() -> Option<*mut JNIEnv> {
 }
 
 extern "system" fn native_say_hello(_: *mut c_void, _: *mut c_void) {
-    const MESSAGE: &[u8] = b"hello\r\n";
-    let mut bytes_written = 0;
-    unsafe {
-        WriteFile(
-            GetStdHandle(STD_OUTPUT_HANDLE),
-            MESSAGE.as_ptr().cast(),
-            MESSAGE.len() as u32,
-            &mut bytes_written,
-            core::ptr::null_mut(),
-        );
-    }
+    printf!("hello");
 }

@@ -9,13 +9,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Objects;
 
-/**
- * A PE image mapped by {@link SeraNative}.
- *
- * <p>The image is intentionally kept outside JVM NativeLibraries. Native methods are therefore
- * registered through an exported bootstrap function instead of {@code System.load}.</p>
- */
-public final class NativeLibrary {
+public record NativeLibrary(Path nativePath, long moduleAddress) {
     private static final int DOS_SIGNATURE = 0x5A4D;
     private static final int PE_SIGNATURE = 0x00004550;
     private static final int PE_HEADER_OFFSET = 0x3C;
@@ -30,23 +24,12 @@ public final class NativeLibrary {
     private static final int EXPORT_DIRECTORY_ADDRESS_OF_NAME_ORDINALS_OFFSET = 36;
     private static final int MAX_EXPORT_NAME_LENGTH = 1024;
 
-    private final Path nativePath;
-    private final long moduleAddress;
-
     public NativeLibrary(Path nativePath, long moduleAddress) {
         this.nativePath = Objects.requireNonNull(nativePath, "nativePath");
         if (moduleAddress == 0L) {
             throw new IllegalArgumentException("moduleAddress must not be zero");
         }
         this.moduleAddress = moduleAddress;
-    }
-
-    public Path getNativePath() {
-        return this.nativePath;
-    }
-
-    public long getModuleAddress() {
-        return this.moduleAddress;
     }
 
     public void registerNative(String bootstrapExport, Method nativeMethod) {

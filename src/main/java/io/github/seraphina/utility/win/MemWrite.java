@@ -23,13 +23,7 @@ public final class MemWrite {
     private static volatile boolean shellcodeEntered;
     private static volatile Api cachedApi;
 
-    private MemWrite() {}
 
-    public static void main(String[] args) {
-        if (!run()) {
-            throw new IllegalStateException("MemWrite self-test failed");
-        }
-    }
 
     public static synchronized PreparedMemory prepareCopy(long sourceAddress, int size)
             throws Exception {
