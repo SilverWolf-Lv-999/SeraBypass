@@ -19,6 +19,7 @@ public class Start {
         JNCT.ivk("hello");
         TestObj obj = (TestObj) JNCT.ivk("defineHiddenClass", "io.github.seraphina.test.HiddenObj", System.class.getClassLoader());
         obj.print();
+        JNCT.ivk("peerJvmTI");
         LOGGER.info("sera_bypass.dll JNI smoke test completed");
         Native.main(args);
         Agent.reg(new TestSeraTrans());
