@@ -34,6 +34,26 @@ public final class Agent {
         return onStart.get();
     }
 
+    public static void transform(Class<?>... loadedClasses) {
+        if (!onStart.get()) {
+            return;
+        }
+        if (loadedClasses == null) {
+            throw new NullPointerException("loadedClasses");
+        }
+
+        for (Class<?> loadedClass : loadedClasses) {
+            if (loadedClass == null) {
+                throw new NullPointerException("loadedClass");
+            }
+            for (SeraTransImpl seraTransImpl : transformers) {
+                if (seraTransImpl != null) {
+                    seraTransImpl.transform(loadedClass);
+                }
+            }
+        }
+    }
+
     public static byte[] transformer(
             ClassLoader loader,
             String className,

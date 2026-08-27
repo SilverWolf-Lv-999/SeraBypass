@@ -5,14 +5,14 @@ import io.github.seraphina.agent.Agent;
 import io.github.seraphina.agent.impl.TestSeraTrans;
 import io.github.seraphina.test.TransTarget;
 import io.github.seraphina.utility.jvm.HotSpotMemoryUtility;
-import io.github.seraphina.utility.jvm.JvmtiUtility;
 import io.github.seraphina.utility.hook.SeraLegitHook;
 
 public class Start {
     public static void main(String[] args) {
         Native.main(args);
-        JvmtiUtility.initializeJvmtiPeer();
+        Agent.reg(new TestSeraTrans());
         Agent.start(args);
+        Agent.transform(TransTarget.class);
 //        Set<?> allclass = HotSpotMemoryUtility.getAllLoadedClasses();
 //        for (Object o : allclass) {
 //            System.out.println(o);
@@ -24,16 +24,21 @@ public class Start {
         System.out.println(a());
         SeraLegitHook.hookMethod(Start.class, "a", 0);
         System.out.println(a());
-        Agent.reg(new TestSeraTrans());
         new Thread(() -> {
             while (true) {
                 try {
                     Thread.sleep(500);
                     TransTarget.targetAdded();
                     TransTarget.targetModify();
-                    TransTarget.class.getDeclaredMethod("targetRemoved").invoke(null);
-                } catch (Exception e) {
-                    e.printStackTrace();
+                    try {
+                        TransTarget.class.getDeclaredMethod("targetRemoved");
+                        throw new AssertionError("targetRemoved() was not removed");
+                    } catch (NoSuchMethodException expected) {
+                        // The transformer is expected to remove targetRemoved().
+                    }
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    return;
                 }
             }
         }).start();

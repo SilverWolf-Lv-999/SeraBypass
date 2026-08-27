@@ -106,6 +106,55 @@ public class SeraLegitHook {
         }
     }
 
+    /**
+     * Replaces a no-argument static void method with an in-memory callback.
+     * The callback is reached from bytecode installed into the target
+     * HotSpot Method*; no class-file or JVMTI operation is used.
+     */
+    public static void hookStaticVoidMethod(
+            Class<?> klass, String methodName, Runnable methodBody) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(methodName, "methodName");
+        Objects.requireNonNull(methodBody, "methodBody");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+            Method targetMethod = findMethodInHierarchy(klass, methodName, new Class<?>[0]);
+            if (targetMethod == null
+                    || !Modifier.isStatic(targetMethod.getModifiers())
+                    || Modifier.isAbstract(targetMethod.getModifiers())
+                    || Modifier.isNative(targetMethod.getModifiers())
+                    || targetMethod.getReturnType() != void.class) {
+                throw new IllegalArgumentException(
+                        "Static void hook requires a no-argument static Java method: "
+                                + klass.getName() + "." + methodName + "()");
+            }
+
+            String callbackId = Long.toUnsignedString(
+                    NEXT_INJECTED_METHOD_ID.incrementAndGet(), Character.MAX_RADIX);
+            INJECTED_METHOD_BODIES.put(callbackId, NO_OP);
+            try {
+                Class<?> donorClass = createDonorClass(callbackId, methodName);
+                Method donorMethod = donorClass.getDeclaredMethod(methodName);
+                donorMethod.invoke(null);
+
+                replaceMethodImplementation(targetMethod, donorMethod);
+                INJECTED_METHODS.put(callbackId, new InjectedMethod(donorClass, 0L));
+                INJECTED_METHOD_BODIES.put(callbackId, methodBody);
+            } catch (Throwable throwable) {
+                INJECTED_METHOD_BODIES.remove(callbackId);
+                if (throwable instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                if (throwable instanceof Error error) {
+                    throw error;
+                }
+                throw new IllegalStateException(
+                        "Could not hook " + klass.getName() + "." + methodName + "()", throwable);
+            }
+        }
+    }
+
     public static void addMethod(Class<?> klass, String methodName, Runnable methodBody) {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(methodName, "methodName");
@@ -183,6 +232,75 @@ public class SeraLegitHook {
         }
     }
 
+    /**
+     * Removes a declared no-argument static method from a loaded class by
+     * replacing its HotSpot InstanceKlass::_methods array in native memory.
+     *
+     * <p>Virtual methods are intentionally rejected: removing one also
+     * requires rebuilding the class and subclass vtables, while the static
+     * method operation is deterministic and does not leave a stale dispatch
+     * slot behind.</p>
+     */
+    public static void removeMethod(Class<?> klass, String methodName, Class<?>... parameterTypes) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(methodName, "methodName");
+        Objects.requireNonNull(parameterTypes, "parameterTypes");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+            Method targetMethod;
+            try {
+                targetMethod = klass.getDeclaredMethod(methodName, parameterTypes);
+            } catch (NoSuchMethodException exception) {
+                throw new IllegalArgumentException(
+                        "No declared method " + methodName + Arrays.toString(parameterTypes)
+                                + " on " + klass.getName(), exception);
+            }
+
+            if (!Modifier.isStatic(targetMethod.getModifiers())
+                    || Modifier.isAbstract(targetMethod.getModifiers())
+                    || Modifier.isNative(targetMethod.getModifiers())) {
+                throw new IllegalArgumentException(
+                        "Only concrete static methods can be removed safely: " + targetMethod);
+            }
+
+            MethodLocation targetLocation;
+            try {
+                targetLocation = locate(targetMethod);
+            } catch (IllegalAccessException exception) {
+                throw new IllegalStateException(
+                        "Could not locate bytecode metadata for " + targetMethod, exception);
+            }
+
+            long klassAddress = klassPointer(klass);
+            long originalMethodsAddress = UnsafeUtility.UNSAFE.getLong(
+                    klassAddress + methodsOffset);
+            long replacementMethodsAddress = compactMethodArray(
+                    originalMethodsAddress, targetLocation.methodAddress);
+            if (replacementMethodsAddress == 0L) {
+                throw new IllegalStateException(
+                        "Could not find " + targetMethod + " in the HotSpot method array");
+            }
+
+            UnsafeUtility.UNSAFE.putLongVolatile(
+                    null, klassAddress + methodsOffset, replacementMethodsAddress);
+            try {
+                clearReflectionData(klass);
+                klass.getDeclaredMethod(methodName, parameterTypes);
+                throw new IllegalStateException(
+                        "HotSpot still exposes removed method " + targetMethod);
+            } catch (NoSuchMethodException expected) {
+                // The reflection view now follows the replacement method array.
+            } catch (RuntimeException exception) {
+                UnsafeUtility.UNSAFE.putLongVolatile(
+                        null, klassAddress + methodsOffset, originalMethodsAddress);
+                clearReflectionData(klass);
+                UnsafeUtility.UNSAFE.freeMemory(replacementMethodsAddress);
+                throw exception;
+            }
+        }
+    }
+
     public static void runInjectedInstance(String callbackId, Object receiver) {
         Consumer<Object> methodBody = INJECTED_INSTANCE_METHOD_BODIES.get(callbackId);
         if (methodBody == null) {
@@ -228,10 +346,6 @@ public class SeraLegitHook {
     }
 
     private static void validateAddMethodTarget(Class<?> klass, String methodName) {
-        if (klass.getClassLoader() != null) {
-            throw new IllegalArgumentException(
-                    "addMethod only supports bootstrap-loaded JDK classes: " + klass.getName());
-        }
         if (klass.isArray() || klass.isPrimitive() || klass.isInterface()
                 || Modifier.isAbstract(klass.getModifiers())) {
             throw new IllegalArgumentException(
@@ -538,6 +652,38 @@ public class SeraLegitHook {
             throw new IllegalStateException("Could not locate ConstantPool::_pool_holder");
         }
         return holderAddress;
+    }
+
+    private static long compactMethodArray(
+            long originalMethodsAddress, long removedMethodAddress) {
+        int originalMethodCount = methodArrayLength(originalMethodsAddress);
+        Long[] methodAddresses = new Long[originalMethodCount];
+        int replacementMethodCount = 0;
+        for (int index = 0; index < originalMethodCount; index++) {
+            long methodAddress = UnsafeUtility.UNSAFE.getLong(
+                    originalMethodsAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES);
+            if (methodAddress != removedMethodAddress) {
+                methodAddresses[replacementMethodCount++] = methodAddress;
+            }
+        }
+        if (replacementMethodCount == originalMethodCount) {
+            return 0L;
+        }
+
+        methodAddresses = Arrays.copyOf(methodAddresses, replacementMethodCount);
+        Arrays.sort(methodAddresses, Comparator.comparingLong(SeraLegitHook::methodNameSymbolAddress));
+
+        long byteCount = ARRAY_ELEMENTS_OFFSET + (long) replacementMethodCount * Long.BYTES;
+        long replacementMethodsAddress = UnsafeUtility.UNSAFE.allocateMemory(byteCount);
+        UnsafeUtility.UNSAFE.setMemory(replacementMethodsAddress, byteCount, (byte) 0);
+        UnsafeUtility.UNSAFE.putInt(
+                replacementMethodsAddress + ARRAY_LENGTH_OFFSET, replacementMethodCount);
+        for (int index = 0; index < replacementMethodCount; index++) {
+            UnsafeUtility.UNSAFE.putLong(
+                    replacementMethodsAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES,
+                    methodAddresses[index]);
+        }
+        return replacementMethodsAddress;
     }
 
     private static long expandedMethodArray(long originalMethodsAddress, long donorMethodAddress) {
