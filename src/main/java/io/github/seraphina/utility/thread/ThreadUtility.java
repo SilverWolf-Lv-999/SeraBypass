@@ -10,7 +10,6 @@ import java.util.IdentityHashMap;
 import java.util.Objects;
 import java.util.Set;
 
-/** Utilities for protecting application threads from Java-level control operations. */
 public final class ThreadUtility {
     private static final String PROTECTED_THREAD_PREFIX = "!!!sera&thread_";
     private static final Object LOCK = new Object();
@@ -23,11 +22,6 @@ public final class ThreadUtility {
 
     private static volatile boolean threadHooksInstalled;
 
-    /**
-     * Marks a thread as protected and installs the Java hooks used to ignore
-     * {@link Thread#stop()}, {@link Thread#suspend()}, and {@link Thread#resume()}
-     * for that exact thread object.
-     */
     public static void protectThread(Thread thread) {
         Objects.requireNonNull(thread, "thread");
 

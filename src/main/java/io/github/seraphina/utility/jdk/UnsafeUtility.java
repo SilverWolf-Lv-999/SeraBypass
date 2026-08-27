@@ -5,7 +5,6 @@ import sun.misc.Unsafe;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 
-/** Provides low-level JDK internals required by the JVM utility packages. */
 @SuppressWarnings("removal")
 public final class UnsafeUtility {
     public static final Unsafe UNSAFE = getUnsafe();

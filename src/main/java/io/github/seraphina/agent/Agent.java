@@ -48,7 +48,12 @@ public final class Agent {
             }
             for (SeraTransImpl seraTransImpl : transformers) {
                 if (seraTransImpl != null) {
-                    seraTransImpl.transform(loadedClass);
+                    seraTransImpl.transform(
+                            loadedClass.getClassLoader(),
+                            loadedClass.getName().replace('.', '/'),
+                            loadedClass,
+                            loadedClass.getProtectionDomain(),
+                            null);
                 }
             }
         }

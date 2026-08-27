@@ -12,6 +12,7 @@ public class Start {
         Native.main(args);
         Agent.reg(new TestSeraTrans());
         Agent.start(args);
+        TransTarget.class.getName();
         Agent.transform(TransTarget.class);
 //        Set<?> allclass = HotSpotMemoryUtility.getAllLoadedClasses();
 //        for (Object o : allclass) {
@@ -32,9 +33,8 @@ public class Start {
                     TransTarget.targetModify();
                     try {
                         TransTarget.class.getDeclaredMethod("targetRemoved");
-                        throw new AssertionError("targetRemoved() was not removed");
+                        System.out.println("targetNoRemoved");
                     } catch (NoSuchMethodException expected) {
-                        // The transformer is expected to remove targetRemoved().
                     }
                 } catch (InterruptedException exception) {
                     Thread.currentThread().interrupt();

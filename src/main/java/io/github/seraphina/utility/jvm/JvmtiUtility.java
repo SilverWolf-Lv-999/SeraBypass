@@ -7,7 +7,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-/** Coordinates the JVMTI peer recovery lifecycle. */
 public final class JvmtiUtility {
     private static final long RECOVERY_PERIOD_MILLIS = 1000L;
     private static final Object LOCK = new Object();

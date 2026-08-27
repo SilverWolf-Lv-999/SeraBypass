@@ -8,7 +8,6 @@ import java.lang.reflect.Constructor;
 import java.util.Arrays;
 import java.util.Objects;
 
-/** Utilities for selecting and invoking constructors with trusted lookup access. */
 public final class ConstructorUtility {
     public static <T> T allocateInstance(Class<T> clazz) {
         Objects.requireNonNull(clazz, "clazz");

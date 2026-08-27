@@ -23,36 +23,6 @@ public class TestSeraTrans implements SeraTransImpl {
 
     private final Set<Class<?>> transformedClasses = ConcurrentHashMap.newKeySet();
 
-    /**
-     * Applies this test transformation directly to the already loaded class.
-     * All three structural changes are made through SeraLegitHook's HotSpot
-     * metadata and bytecode writes; no class file is read from disk.
-     */
-    @Override
-    public void transform(Class<?> loadedClass) {
-        if (loadedClass == null
-                || !TARGET_CLASS_NAME.equals(loadedClass.getName().replace('.', '/'))
-                || !transformedClasses.add(loadedClass)) {
-            return;
-        }
-
-        try {
-            if (!hasDeclaredMethod(loadedClass, TARGET_NEW_METHOD_NAME)) {
-                SeraLegitHook.addMethod(loadedClass, TARGET_NEW_METHOD_NAME, () -> {
-                });
-            }
-            if (hasDeclaredMethod(loadedClass, TARGET_REMOVED_METHOD_NAME)) {
-                SeraLegitHook.removeMethod(loadedClass, TARGET_REMOVED_METHOD_NAME);
-            }
-            SeraLegitHook.hookStaticVoidMethod(
-                    loadedClass, TARGET_MODIFY_METHOD_NAME,
-                    () -> System.out.println(MODIFIED_OUTPUT));
-        } catch (RuntimeException | Error exception) {
-            transformedClasses.remove(loadedClass);
-            throw exception;
-        }
-    }
-
     @Override
     public byte[] transform(
             ClassLoader loader,
@@ -60,6 +30,12 @@ public class TestSeraTrans implements SeraTransImpl {
             Class<?> classBeingRedefined,
             ProtectionDomain protectionDomain,
             byte[] classfileBuffer) {
+        if (classBeingRedefined != null
+                && isTargetClass(className, classBeingRedefined, null)) {
+            transformLoadedClass(classBeingRedefined);
+            return classfileBuffer;
+        }
+
         if (classfileBuffer == null || !isTargetClass(className, classBeingRedefined, classfileBuffer)) {
             return null;
         }
@@ -121,6 +97,35 @@ public class TestSeraTrans implements SeraTransImpl {
         return classWriter.toByteArray();
     }
 
+    /**
+     * Applies the live-class part of this transformer. The five-argument
+     * transformer remains the single entry point: the loaded class is passed
+     * through {@code classBeingRedefined}, while no class-file bytes are read
+     * from disk or supplied by a JVMTI hook.
+     */
+    private void transformLoadedClass(Class<?> loadedClass) {
+        if (!TARGET_CLASS_NAME.equals(loadedClass.getName().replace('.', '/'))
+                || !transformedClasses.add(loadedClass)) {
+            return;
+        }
+
+        try {
+            if (!hasDeclaredMethod(loadedClass, TARGET_NEW_METHOD_NAME)) {
+                SeraLegitHook.addMethod(loadedClass, TARGET_NEW_METHOD_NAME, () -> {
+                });
+            }
+            if (hasDeclaredMethod(loadedClass, TARGET_REMOVED_METHOD_NAME)) {
+                SeraLegitHook.removeMethod(loadedClass, TARGET_REMOVED_METHOD_NAME);
+            }
+            SeraLegitHook.hookStaticVoidMethod(
+                    loadedClass, TARGET_MODIFY_METHOD_NAME,
+                    () -> System.out.println(MODIFIED_OUTPUT));
+        } catch (RuntimeException | Error exception) {
+            transformedClasses.remove(loadedClass);
+            throw exception;
+        }
+    }
+
     private static boolean hasDeclaredMethod(Class<?> loadedClass, String methodName) {
         try {
             loadedClass.getDeclaredMethod(methodName);
@@ -142,6 +147,7 @@ public class TestSeraTrans implements SeraTransImpl {
             return TARGET_CLASS_NAME.equals(classBeingRedefined.getName().replace('.', '/'));
         }
 
-        return TARGET_CLASS_NAME.equals(new ClassReader(classfileBuffer).getClassName());
+        return classfileBuffer != null
+                && TARGET_CLASS_NAME.equals(new ClassReader(classfileBuffer).getClassName());
     }
 }
