@@ -1,5 +1,6 @@
 plugins {
     id 'java'
+    id 'application'
 }
 
 group = 'io.github.seraphina'
@@ -19,6 +20,45 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+application {
+    mainClass = 'io.github.seraphina.Start'
+}
+
+def nativeProjectDirectory = file('src/main/natives')
+def nativeLibraryDirectory = file('src/main/natives/target/release')
+def generatedNativeResourceDirectory = layout.buildDirectory.dir('generated/resources/native')
+
+tasks.register('buildNative', Exec) {
+    group = 'build'
+    description = 'Builds sera_bypass.dll from the Rust JNI project.'
+    workingDir = nativeProjectDirectory
+    commandLine 'cargo', 'build', '--release'
+
+    inputs.files(fileTree(nativeProjectDirectory) {
+        include 'Cargo.toml', 'Cargo.lock', 'src/**'
+    })
+    outputs.file(file("${nativeLibraryDirectory}/sera_bypass.dll"))
+}
+
+tasks.register('copyNativeLibrary', Copy) {
+    group = 'build'
+    description = 'Stages the Rust DLL as a packaged Java resource.'
+    dependsOn tasks.named('buildNative')
+    from(nativeLibraryDirectory) {
+        include 'sera_bypass.dll'
+    }
+    into(generatedNativeResourceDirectory)
+}
+
+tasks.named('processResources') {
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    dependsOn tasks.named('copyNativeLibrary')
+    from(tasks.named('copyNativeLibrary'))
+}
+
 test {
     useJUnitPlatform()
 }
+
+
+
