@@ -14,7 +14,10 @@ dependencies {
     implementation 'net.java.dev.jna:jna:5.19.1'
     implementation 'org.apache.logging.log4j:log4j-api:2.26.1'
     implementation 'org.ow2.asm:asm:9.9.1'
+    implementation 'org.lwjgl:lwjgl:3.3.3'
+    implementation 'org.apache.commons:commons-lang3:3.20.0'
     runtimeOnly 'org.apache.logging.log4j:log4j-core:2.26.1'
+    runtimeOnly 'org.lwjgl:lwjgl:3.3.3:natives-windows'
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

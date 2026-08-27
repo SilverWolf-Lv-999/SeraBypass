@@ -4,60 +4,35 @@ import com.sun.jna.Native;
 import io.github.seraphina.agent.Agent;
 import io.github.seraphina.agent.impl.TestSeraTrans;
 import io.github.seraphina.cpp.SeraBypass;
+import io.github.seraphina.utility.SysUtility;
+import io.github.seraphina.utility.win.NativeLibrary;
 import io.github.seraphina.test.TransTarget;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 public class Start {
+    private static final String SERA_BYPASS_NATIVE_RESOURCE = "sera_bypass.dll";
+    private static final String SERA_BYPASS_NATIVE_BOOTSTRAP = "sera_bypass_register_natives";
+
     public static final Logger LOGGER = LogManager.getLogger();
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws NoSuchMethodException {
+        NativeLibrary nativeLibrary = SysUtility.loadNative(SeraBypass.class, SERA_BYPASS_NATIVE_RESOURCE);
+        nativeLibrary.registerNative(
+                SERA_BYPASS_NATIVE_BOOTSTRAP,
+                SeraBypass.class.getDeclaredMethod("nativeSayHello")
+        );
+        SeraBypass.nativeSayHello();
+        LOGGER.info("sera_bypass.dll JNI smoke test completed");
+
         Native.main(args);
         Agent.reg(new TestSeraTrans());
         Agent.start(args);
         TransTarget.class.getName();
         Agent.transform(TransTarget.class);
-        SeraBypass.nativeSayHello();
-//        Set<?> allclass = HotSpotMemoryUtility.getAllLoadedClasses();
-//        for (Object o : allclass) {
-//            System.out.println(o);
-//        }
-//        Set<Object> objects = HotSpotMemoryUtility.getAllLoadedObjects();
-//        for (Object o : objects) {
-//            System.out.println(o);
-//        }
-//        System.out.println(a());
-//        SeraLegitHook.hookMethod(Start.class, "a", 0);
-//        System.out.println(a());
-//        new Thread(() -> {
-//            while (true) {
-//                try {
-//                    Thread.sleep(500);
-//                    TransTarget.targetAdded();
-//                    TransTarget.targetModify();
-//                    for (Method m : TransTarget.class.getDeclaredMethods()) {
-//                        System.out.println(m.getName());
-//                    }
-//                    for (Field f : TransTarget.class.getDeclaredFields()) {
-//                        System.out.println(f.getName());
-//                    }
-//                    try {
-//                        TransTarget.class.getDeclaredMethod("targetRemoved");
-//                        System.out.println("targetNoRemoved");
-//                    } catch (NoSuchMethodException expected) {
-//                    }
-//                } catch (InterruptedException exception) {
-//                    Thread.currentThread().interrupt();
-//                    return;
-//                }
-//            }
-//        }).start();
     }
 
     public static int a() {
         return 1;
     }
 }
-
-
-

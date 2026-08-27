@@ -1,14 +1,14 @@
 package io.github.seraphina.cpp;
 
-import io.github.seraphina.utility.SysUtility;
-
+/**
+ * JNI smoke-test declaration.
+ *
+ * <p>This class deliberately contains no DLL loading logic. Native images are loaded through
+ * the Java-side {@code SysUtility} API before this method is invoked.</p>
+ */
 public final class SeraBypass {
+    private SeraBypass() {
+    }
 
     public static native void nativeSayHello();
-
-    static {
-        if (SysUtility.loadNative("sera_bypass.dll")) {
-            System.out.println("dll has been load");
-        }
-    }
 }

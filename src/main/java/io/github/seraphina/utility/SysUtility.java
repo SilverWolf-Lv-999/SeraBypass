@@ -1,7 +1,12 @@
 package io.github.seraphina.utility;
 
+import io.github.seraphina.utility.win.NativeLibrary;
+import io.github.seraphina.utility.win.SeraNative;
+import io.github.seraphina.utility.win.WIN32;
+
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URL;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -9,64 +14,101 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.HashMap;
+import java.util.Map;
 
+/**
+ * Java-side native library loading utilities.
+ *
+ * <p>Libraries are extracted from the caller's resources and mapped through {@link SeraNative}.
+ * This utility never uses {@link System#load(String)} or {@link System#loadLibrary(String)}.</p>
+ */
 public final class SysUtility {
     private static final Object NATIVE_LOAD_LOCK = new Object();
-    private static final Set<String> LOADED_NATIVE_RESOURCE_PATHS = new HashSet<>();
+    private static final Map<Path, NativeLibrary> NATIVE_LIBRARIES = new HashMap<>();
 
     private static volatile Throwable lastNativeLoadFailure;
 
-    public static boolean loadNative(String nativeResourcePath) {
+    private SysUtility() {
+    }
+
+    /**
+     * Loads a native resource owned by this library.
+     *
+     * @param nativeResourcePath classpath resource path of the native library
+     * @return mapped native library
+     */
+    public static NativeLibrary loadNative(String nativeResourcePath) {
         return loadNative(SysUtility.class, nativeResourcePath);
     }
 
-    public static boolean loadNative(Class<?> resourceOwner, String nativeResourcePath) {
-        try {
-            loadNativeOrThrow(resourceOwner, nativeResourcePath);
-            return true;
-        } catch (Throwable throwable) {
-            lastNativeLoadFailure = throwable;
-            return false;
-        }
+    /**
+     * Loads a native resource owned by the supplied class.
+     *
+     * <p>Library consumers should pass a class from their own artifact so the resource is resolved
+     * from the correct class loader.</p>
+     *
+     * @param resourceOwner class whose class loader owns the resource
+     * @param nativeResourcePath classpath resource path of the native library
+     * @return mapped native library
+     */
+    public static NativeLibrary loadNative(Class<?> resourceOwner, String nativeResourcePath) {
+        return loadNative(resourceOwner, nativeResourcePath, getDefaultNativeDirectory());
     }
 
-    public static void loadNativeOrThrow(String nativeResourcePath) throws IOException {
-        loadNativeOrThrow(SysUtility.class, nativeResourcePath);
-    }
-
-    public static void loadNativeOrThrow(Class<?> resourceOwner, String nativeResourcePath) throws IOException {
+    /**
+     * Loads a native resource into a caller-selected extraction directory.
+     *
+     * @param resourceOwner class whose class loader owns the resource
+     * @param nativeResourcePath classpath resource path of the native library
+     * @param nativeDirectory directory used to extract the library
+     * @return mapped native library
+     */
+    public static NativeLibrary loadNative(
+            Class<?> resourceOwner,
+            String nativeResourcePath,
+            Path nativeDirectory
+    ) {
         if (resourceOwner == null) {
             throw new IllegalArgumentException("resourceOwner must not be null");
         }
+        if (nativeDirectory == null) {
+            throw new IllegalArgumentException("nativeDirectory must not be null");
+        }
 
         String normalizedResourcePath = normalizeResourcePath(nativeResourcePath);
-        synchronized (NATIVE_LOAD_LOCK) {
-            if (LOADED_NATIVE_RESOURCE_PATHS.contains(normalizedResourcePath)) {
-                return;
+        try {
+            URL nativeResourceUrl = getNativeResource(resourceOwner, normalizedResourcePath);
+            try (InputStream nativeStream = nativeResourceUrl.openStream()) {
+                byte[] nativeBytes = nativeStream.readAllBytes();
+                Path nativePath = extractNativeResource(
+                        normalizedResourcePath,
+                        nativeBytes,
+                        nativeDirectory
+                );
+                return mapNativeLibrary(nativePath);
             }
-
-            byte[] nativeBytes = readNativeResource(resourceOwner, normalizedResourcePath);
-            Path extractedNativePath = extractNativeResource(normalizedResourcePath, nativeBytes);
-            System.load(extractedNativePath.toAbsolutePath().toString());
-
-            LOADED_NATIVE_RESOURCE_PATHS.add(normalizedResourcePath);
-            lastNativeLoadFailure = null;
+        } catch (Throwable throwable) {
+            lastNativeLoadFailure = throwable;
+            throw new IllegalStateException("Unable to map native resource: " + normalizedResourcePath, throwable);
         }
     }
 
-    public static boolean loadNativeFile(Path nativePath) {
+    /**
+     * Maps a native library that already exists on disk.
+     *
+     * @param nativePath filesystem path to the native library
+     * @return mapped native library
+     */
+    public static NativeLibrary loadNativeFile(Path nativePath) {
+        if (nativePath == null) {
+            throw new IllegalArgumentException("nativePath must not be null");
+        }
         try {
-            if (nativePath == null) {
-                throw new IllegalArgumentException("nativePath must not be null");
-            }
-            System.load(nativePath.toAbsolutePath().normalize().toString());
-            lastNativeLoadFailure = null;
-            return true;
+            return mapNativeLibrary(nativePath.toAbsolutePath().normalize());
         } catch (Throwable throwable) {
             lastNativeLoadFailure = throwable;
-            return false;
+            throw new IllegalStateException("Unable to map native library: " + nativePath, throwable);
         }
     }
 
@@ -74,10 +116,40 @@ public final class SysUtility {
         return lastNativeLoadFailure;
     }
 
+    private static NativeLibrary mapNativeLibrary(Path nativePath) throws IOException {
+        if (!Files.isRegularFile(nativePath)) {
+            throw new IOException("Native library does not exist: " + nativePath);
+        }
+
+        synchronized (NATIVE_LOAD_LOCK) {
+            NativeLibrary loadedLibrary = NATIVE_LIBRARIES.get(nativePath);
+            if (loadedLibrary != null) {
+                return loadedLibrary;
+            }
+
+            long moduleAddress = new SeraNative().IIllII00IIllII(
+                    new WIN32().llIIll01l(),
+                    nativePath.toString()
+            );
+            if (moduleAddress == 0L) {
+                throw new UnsatisfiedLinkError("SeraNative failed to map: " + nativePath);
+            }
+
+            NativeLibrary nativeLibrary = new NativeLibrary(nativePath, moduleAddress);
+            NATIVE_LIBRARIES.put(nativePath, nativeLibrary);
+            lastNativeLoadFailure = null;
+            return nativeLibrary;
+        }
+    }
+
+    private static Path getDefaultNativeDirectory() {
+        String packageDirectory = SysUtility.class.getPackageName().replace('.', '_');
+        return Path.of(System.getProperty("java.io.tmpdir"), packageDirectory, "native");
+    }
 
     private static String normalizeResourcePath(String nativeResourcePath) {
         if (nativeResourcePath == null || nativeResourcePath.isBlank()) {
-            return null;
+            throw new IllegalArgumentException("nativeResourcePath must not be blank");
         }
 
         String normalizedResourcePath = nativeResourcePath.replace('\\', '/').strip();
@@ -85,32 +157,38 @@ public final class SysUtility {
             normalizedResourcePath = normalizedResourcePath.substring(1);
         }
         if (normalizedResourcePath.isEmpty()) {
-            return null;
+            throw new IllegalArgumentException("nativeResourcePath must not be blank");
         }
         return normalizedResourcePath;
     }
 
-    private static byte[] readNativeResource(Class<?> resourceOwner, String nativeResourcePath) throws IOException {
-        try (InputStream inputStream = resourceOwner.getResourceAsStream('/' + nativeResourcePath)) {
-            if (inputStream == null) {
-                throw new IOException("Native resource not found: " + nativeResourcePath);
-            }
-            return inputStream.readAllBytes();
+    private static URL getNativeResource(Class<?> resourceOwner, String nativeResourcePath) throws IOException {
+        ClassLoader classLoader = resourceOwner.getClassLoader();
+        URL nativeResourceUrl = classLoader == null
+                ? ClassLoader.getSystemResource(nativeResourcePath)
+                : classLoader.getResource(nativeResourcePath);
+        if (nativeResourceUrl == null) {
+            throw new IOException("Native resource not found: " + nativeResourcePath);
         }
+        return nativeResourceUrl;
     }
 
-    private static Path extractNativeResource(String nativeResourcePath, byte[] nativeBytes) throws IOException {
+    private static Path extractNativeResource(
+            String nativeResourcePath,
+            byte[] nativeBytes,
+            Path nativeDirectory
+    ) throws IOException {
         String resourceFileName = nativeResourcePath.substring(nativeResourcePath.lastIndexOf('/') + 1);
         String extractedFileName = withContentHash(resourceFileName, sha256(nativeBytes));
-        Path nativeCacheDirectory = Path.of(System.getProperty("java.io.tmpdir"), "sera-bypass/native");
-        Path extractedNativePath = nativeCacheDirectory.resolve(extractedFileName);
+        Path normalizedNativeDirectory = nativeDirectory.toAbsolutePath().normalize();
+        Path extractedNativePath = normalizedNativeDirectory.resolve(extractedFileName);
 
-        Files.createDirectories(nativeCacheDirectory);
+        Files.createDirectories(normalizedNativeDirectory);
         if (Files.isRegularFile(extractedNativePath) && Files.size(extractedNativePath) == nativeBytes.length) {
             return extractedNativePath;
         }
 
-        Path temporaryNativePath = Files.createTempFile(nativeCacheDirectory, extractedFileName, ".tmp");
+        Path temporaryNativePath = Files.createTempFile(normalizedNativeDirectory, extractedFileName, ".tmp");
         try {
             Files.write(temporaryNativePath, nativeBytes, StandardOpenOption.TRUNCATE_EXISTING);
             moveIntoPlace(temporaryNativePath, extractedNativePath);
@@ -122,8 +200,12 @@ public final class SysUtility {
 
     private static void moveIntoPlace(Path temporaryNativePath, Path extractedNativePath) throws IOException {
         try {
-            Files.move(temporaryNativePath, extractedNativePath,
-                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(
+                    temporaryNativePath,
+                    extractedNativePath,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+            );
         } catch (AtomicMoveNotSupportedException exception) {
             Files.move(temporaryNativePath, extractedNativePath, StandardCopyOption.REPLACE_EXISTING);
         }
