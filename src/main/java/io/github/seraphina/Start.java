@@ -7,6 +7,9 @@ import io.github.seraphina.test.TransTarget;
 import io.github.seraphina.utility.jvm.HotSpotMemoryUtility;
 import io.github.seraphina.utility.hook.SeraLegitHook;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+
 public class Start {
     public static void main(String[] args) {
         Native.main(args);
@@ -31,6 +34,12 @@ public class Start {
                     Thread.sleep(500);
                     TransTarget.targetAdded();
                     TransTarget.targetModify();
+                    for (Method m : TransTarget.class.getDeclaredMethods()) {
+                        System.out.println(m.getName());
+                    }
+                    for (Field f : TransTarget.class.getDeclaredFields()) {
+                        System.out.println(f.getName());
+                    }
                     try {
                         TransTarget.class.getDeclaredMethod("targetRemoved");
                         System.out.println("targetNoRemoved");

@@ -17,6 +17,10 @@ public class TestSeraTrans implements SeraTransImpl {
     private static final String TARGET_REMOVED_METHOD_NAME = "targetRemoved";
     private static final String TARGET_NEW_METHOD_NAME = "targetNew";
     private static final String TARGET_MODIFY_METHOD_NAME = "targetModify";
+    private static final String TARGET_REMOVED_FIELD_NAME = "targetRemovedField";
+    private static final String TARGET_ADDED_FIELD_NAME = "targetAddedField";
+    private static final String TARGET_MODIFY_FIELD_NAME = "targetModifiedField";
+    private static final String INT_DESCRIPTOR = "I";
     private static final String NO_ARGUMENT_VOID_DESCRIPTOR = "()V";
     private static final String ORIGINAL_OUTPUT = "1";
     private static final String MODIFIED_OUTPUT = "c";
@@ -44,6 +48,28 @@ public class TestSeraTrans implements SeraTransImpl {
         ClassWriter classWriter = new ClassWriter(classReader, ClassWriter.COMPUTE_MAXS);
         classReader.accept(new ClassVisitor(Opcodes.ASM9, classWriter) {
             private boolean targetNewPresent;
+            private boolean targetAddedFieldPresent;
+
+            @Override
+            public org.objectweb.asm.FieldVisitor visitField(
+                    int access,
+                    String name,
+                    String descriptor,
+                    String signature,
+                    Object value) {
+                if (TARGET_REMOVED_FIELD_NAME.equals(name) && INT_DESCRIPTOR.equals(descriptor)) {
+                    return null;
+                }
+
+                if (TARGET_ADDED_FIELD_NAME.equals(name) && INT_DESCRIPTOR.equals(descriptor)) {
+                    targetAddedFieldPresent = true;
+                }
+
+                if (TARGET_MODIFY_FIELD_NAME.equals(name) && INT_DESCRIPTOR.equals(descriptor)) {
+                    access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC;
+                }
+                return super.visitField(access, name, descriptor, signature, value);
+            }
 
             @Override
             public MethodVisitor visitMethod(
@@ -62,15 +88,35 @@ public class TestSeraTrans implements SeraTransImpl {
                 }
 
                 MethodVisitor methodVisitor = super.visitMethod(access, name, descriptor, signature, exceptions);
-                if (!TARGET_MODIFY_METHOD_NAME.equals(name)
-                        || !NO_ARGUMENT_VOID_DESCRIPTOR.equals(descriptor)) {
-                    return methodVisitor;
+                if (methodVisitor == null) {
+                    return null;
                 }
+                boolean modifiesOutput = TARGET_MODIFY_METHOD_NAME.equals(name)
+                        && NO_ARGUMENT_VOID_DESCRIPTOR.equals(descriptor);
 
                 return new MethodVisitor(Opcodes.ASM9, methodVisitor) {
                     @Override
                     public void visitLdcInsn(Object value) {
-                        super.visitLdcInsn(ORIGINAL_OUTPUT.equals(value) ? MODIFIED_OUTPUT : value);
+                        super.visitLdcInsn(modifiesOutput && ORIGINAL_OUTPUT.equals(value)
+                                ? MODIFIED_OUTPUT
+                                : value);
+                    }
+
+                    @Override
+                    public void visitFieldInsn(int opcode, String owner, String name, String descriptor) {
+                        if (TARGET_CLASS_NAME.equals(owner)
+                                && TARGET_REMOVED_FIELD_NAME.equals(name)
+                                && INT_DESCRIPTOR.equals(descriptor)) {
+                            if (opcode == Opcodes.GETSTATIC) {
+                                super.visitInsn(Opcodes.ICONST_0);
+                                return;
+                            }
+                            if (opcode == Opcodes.PUTSTATIC) {
+                                super.visitInsn(Opcodes.POP);
+                                return;
+                            }
+                        }
+                        super.visitFieldInsn(opcode, owner, name, descriptor);
                     }
                 };
             }
@@ -88,6 +134,16 @@ public class TestSeraTrans implements SeraTransImpl {
                     methodVisitor.visitInsn(Opcodes.RETURN);
                     methodVisitor.visitMaxs(0, 0);
                     methodVisitor.visitEnd();
+                }
+
+                if (!targetAddedFieldPresent) {
+                    org.objectweb.asm.FieldVisitor fieldVisitor = super.visitField(
+                            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                            TARGET_ADDED_FIELD_NAME,
+                            INT_DESCRIPTOR,
+                            null,
+                            null);
+                    fieldVisitor.visitEnd();
                 }
 
                 super.visitEnd();
@@ -114,8 +170,24 @@ public class TestSeraTrans implements SeraTransImpl {
                 SeraLegitHook.addMethod(loadedClass, TARGET_NEW_METHOD_NAME, () -> {
                 });
             }
+            if (!hasDeclaredField(loadedClass, TARGET_ADDED_FIELD_NAME)) {
+                SeraLegitHook.addStaticField(
+                        loadedClass,
+                        TARGET_ADDED_FIELD_NAME,
+                        TARGET_REMOVED_FIELD_NAME,
+                        java.lang.reflect.Modifier.PUBLIC | java.lang.reflect.Modifier.STATIC);
+            }
             if (hasDeclaredMethod(loadedClass, TARGET_REMOVED_METHOD_NAME)) {
                 SeraLegitHook.removeMethod(loadedClass, TARGET_REMOVED_METHOD_NAME);
+            }
+            if (hasDeclaredField(loadedClass, TARGET_REMOVED_FIELD_NAME)) {
+                SeraLegitHook.removeField(loadedClass, TARGET_REMOVED_FIELD_NAME);
+            }
+            if (!hasPublicDeclaredField(loadedClass, TARGET_MODIFY_FIELD_NAME)) {
+                SeraLegitHook.modifyFieldModifiers(
+                        loadedClass,
+                        TARGET_MODIFY_FIELD_NAME,
+                        java.lang.reflect.Modifier.PUBLIC | java.lang.reflect.Modifier.STATIC);
             }
             SeraLegitHook.hookStaticVoidMethod(
                     loadedClass, TARGET_MODIFY_METHOD_NAME,
@@ -123,6 +195,24 @@ public class TestSeraTrans implements SeraTransImpl {
         } catch (RuntimeException | Error exception) {
             transformedClasses.remove(loadedClass);
             throw exception;
+        }
+    }
+
+    private static boolean hasDeclaredField(Class<?> loadedClass, String fieldName) {
+        try {
+            loadedClass.getDeclaredField(fieldName);
+            return true;
+        } catch (NoSuchFieldException exception) {
+            return false;
+        }
+    }
+
+    private static boolean hasPublicDeclaredField(Class<?> loadedClass, String fieldName) {
+        try {
+            return java.lang.reflect.Modifier.isPublic(
+                    loadedClass.getDeclaredField(fieldName).getModifiers());
+        } catch (NoSuchFieldException exception) {
+            return false;
         }
     }
 

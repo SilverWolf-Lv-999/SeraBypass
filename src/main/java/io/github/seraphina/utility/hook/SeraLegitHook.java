@@ -6,6 +6,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -27,6 +28,7 @@ public class SeraLegitHook {
     private static final long CONSTANT_POOL_LENGTH_OFFSET = 60L;
     private static final long CONSTANT_POOL_ENTRIES_OFFSET = 72L;
     private static final long ARRAY_LENGTH_OFFSET = 0L;
+    private static final long SHORT_ARRAY_ELEMENTS_OFFSET = Integer.BYTES;
     private static final long ARRAY_ELEMENTS_OFFSET = 8L;
     private static final long SYMBOL_LENGTH_OFFSET = 4L;
     private static final long SYMBOL_BODY_OFFSET = 6L;
@@ -37,6 +39,14 @@ public class SeraLegitHook {
     private static final long VTABLE_LAYOUT_SCAN_BYTES = 2048L;
     private static final long INSTANCE_KLASS_LAYOUT_SCAN_BYTES = 4096L;
     private static final long CONSTANT_POOL_HOLDER_SCAN_BYTES = 64L;
+    private static final int FIELD_ACCESS_FLAGS_OFFSET = 0;
+    private static final int FIELD_NAME_INDEX_OFFSET = 1;
+    private static final int FIELD_SIGNATURE_INDEX_OFFSET = 2;
+    private static final int FIELD_LOW_PACKED_OFFSET = 4;
+    private static final int FIELD_HIGH_PACKED_OFFSET = 5;
+    private static final int FIELD_SLOTS = 6;
+    private static final int MAX_FIELD_SLOTS = 1_000_000;
+    private static final int HOTSPOT_FIELD_MODIFIER_MASK = Modifier.fieldModifiers();
     private static final byte NOP = 0x00;
     private static final byte RETURN = (byte) 0xB1;
     private static final int MAX_METHOD_ID = 0xFFFE;
@@ -49,9 +59,14 @@ public class SeraLegitHook {
     private static final Map<String, Consumer<Object>> INJECTED_INSTANCE_METHOD_BODIES =
             new ConcurrentHashMap<>();
     private static final Map<String, InjectedMethod> INJECTED_METHODS = new ConcurrentHashMap<>();
+    private static final Set<Long> INJECTED_FIELD_ARRAYS = ConcurrentHashMap.newKeySet();
 
     private static volatile boolean initialized;
     private static Class<?> directMethodHandleClass;
+    private static Class<?> constantPoolClass;
+    private static MethodHandle classGetConstantPool;
+    private static MethodHandle constantPoolGetSize;
+    private static MethodHandle constantPoolGetUtf8At;
     private static long directMethodHandleMemberOffset;
     private static long memberNameResolvedMethodOffset;
     private static ReferenceSlot referenceSlot;
@@ -60,6 +75,8 @@ public class SeraLegitHook {
     private static int narrowOopShift;
     private static long vtableStartOffset;
     private static long methodsOffset;
+    private static long fieldsOffset;
+    private static long javaFieldsCountOffset;
     private static long classReflectionDataOffset;
     private static long metadataAddressPrefix;
 
@@ -301,6 +318,113 @@ public class SeraLegitHook {
         }
     }
 
+    /**
+     * Adds a static reflection field by creating a second field descriptor for
+     * an existing static storage slot. The new field and its backing field
+     * therefore share the same value. This is the only safe schema extension
+     * that can be performed on an already allocated HotSpot class mirror.
+     *
+     * <p>The target class must already contain UTF-8 constants for the new
+     * field name and the backing field descriptor. Class bytecode transformed
+     * before definition has no such restriction.</p>
+     */
+    public static void addStaticField(
+            Class<?> klass, String fieldName, String backingFieldName, int modifiers) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(fieldName, "fieldName");
+        Objects.requireNonNull(backingFieldName, "backingFieldName");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+            validateFieldName(fieldName);
+            validateStaticFieldModifiers(modifiers);
+            ensureDeclaredFieldAbsent(klass, fieldName);
+
+            Field backingField = requireDeclaredField(klass, backingFieldName);
+            if (!Modifier.isStatic(backingField.getModifiers())) {
+                throw new IllegalArgumentException(
+                        "The backing field must be static: " + backingField);
+            }
+
+            long originalFieldsAddress = fieldArrayAddress(klass);
+            int fieldNameIndex = findConstantPoolUtf8Index(klass, fieldName);
+            int backingFieldIndex = findFieldIndex(klass, originalFieldsAddress, backingField);
+            short[] backingFieldInfo = copyFieldInfo(originalFieldsAddress, backingFieldIndex);
+            backingFieldInfo[FIELD_NAME_INDEX_OFFSET] = unsignedShort(fieldNameIndex);
+            backingFieldInfo[FIELD_ACCESS_FLAGS_OFFSET] = mergedFieldModifiers(
+                    backingFieldInfo[FIELD_ACCESS_FLAGS_OFFSET], modifiers);
+
+            long replacementFieldsAddress = expandedFieldArray(
+                    originalFieldsAddress, backingFieldInfo);
+            replaceFieldArrayAndVerify(
+                    klass,
+                    originalFieldsAddress,
+                    replacementFieldsAddress,
+                    () -> verifyAddedField(klass, fieldName, backingField.getType(), modifiers));
+        }
+    }
+
+    /**
+     * Removes one declared field from HotSpot's InstanceKlass field metadata.
+     * Existing compiled code and stale {@link Field} instances must not be
+     * used afterwards; the operation is intended for reflection-visible
+     * transformer changes on a live class.
+     */
+    public static void removeField(Class<?> klass, String fieldName) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(fieldName, "fieldName");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+            // A pending <clinit> may still execute putstatic/getstatic for this
+            // field. Finish it before removing the metadata entry so the class
+            // cannot subsequently fail initialization with NoSuchFieldError.
+            ensureClassInitialized(klass);
+            Field targetField = requireDeclaredField(klass, fieldName);
+            long originalFieldsAddress = fieldArrayAddress(klass);
+            int targetFieldIndex = findFieldIndex(klass, originalFieldsAddress, targetField);
+            long replacementFieldsAddress = compactFieldArray(
+                    originalFieldsAddress, targetFieldIndex);
+
+            replaceFieldArrayAndVerify(
+                    klass,
+                    originalFieldsAddress,
+                    replacementFieldsAddress,
+                    () -> verifyRemovedField(klass, fieldName));
+        }
+    }
+
+    /**
+     * Replaces the Java visibility and field modifier bits of a declared
+     * field while preserving HotSpot-specific field flags and its storage
+     * offset.
+     */
+    public static void modifyFieldModifiers(Class<?> klass, String fieldName, int modifiers) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(fieldName, "fieldName");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+            validateFieldModifiers(modifiers);
+            Field targetField = requireDeclaredField(klass, fieldName);
+            long fieldsAddress = fieldArrayAddress(klass);
+            int targetFieldIndex = findFieldIndex(klass, fieldsAddress, targetField);
+            long accessFlagsAddress = fieldInfoAddress(fieldsAddress, targetFieldIndex)
+                    + (long) FIELD_ACCESS_FLAGS_OFFSET * Short.BYTES;
+            short originalAccessFlags = UnsafeUtility.UNSAFE.getShort(accessFlagsAddress);
+            UnsafeUtility.UNSAFE.putShortVolatile(
+                    null, accessFlagsAddress, mergedFieldModifiers(originalAccessFlags, modifiers));
+            try {
+                clearReflectionData(klass);
+                verifyModifiedField(klass, fieldName, modifiers);
+            } catch (RuntimeException | Error exception) {
+                UnsafeUtility.UNSAFE.putShortVolatile(null, accessFlagsAddress, originalAccessFlags);
+                clearReflectionData(klass);
+                throw exception;
+            }
+        }
+    }
+
     public static void runInjectedInstance(String callbackId, Object receiver) {
         Consumer<Object> methodBody = INJECTED_INSTANCE_METHOD_BODIES.get(callbackId);
         if (methodBody == null) {
@@ -386,6 +510,348 @@ public class SeraLegitHook {
 
     private static boolean isAsciiJavaIdentifierPart(char value) {
         return isAsciiJavaIdentifierStart(value) || value >= '0' && value <= '9';
+    }
+
+    private static void validateFieldName(String fieldName) {
+        if (!isAsciiJavaIdentifier(fieldName)) {
+            throw new IllegalArgumentException(
+                    "Field name must be an ASCII Java identifier: " + fieldName);
+        }
+    }
+
+    private static void validateStaticFieldModifiers(int modifiers) {
+        validateFieldModifiers(modifiers);
+        if (!Modifier.isStatic(modifiers)) {
+            throw new IllegalArgumentException("An added live field must be static");
+        }
+    }
+
+    private static void validateFieldModifiers(int modifiers) {
+        if ((modifiers & ~HOTSPOT_FIELD_MODIFIER_MASK) != 0) {
+            throw new IllegalArgumentException(
+                    "Unsupported field modifiers: 0x" + Integer.toHexString(modifiers));
+        }
+
+        int visibility = modifiers & (Modifier.PUBLIC | Modifier.PROTECTED | Modifier.PRIVATE);
+        if (Integer.bitCount(visibility) > 1) {
+            throw new IllegalArgumentException(
+                    "A field can declare at most one visibility modifier: 0x"
+                            + Integer.toHexString(modifiers));
+        }
+    }
+
+    private static void ensureDeclaredFieldAbsent(Class<?> klass, String fieldName) {
+        try {
+            klass.getDeclaredField(fieldName);
+            throw new IllegalArgumentException(
+                    klass.getName() + " already declares field " + fieldName);
+        } catch (NoSuchFieldException ignored) {
+            // The requested field name is available.
+        }
+    }
+
+    private static Field requireDeclaredField(Class<?> klass, String fieldName) {
+        try {
+            return klass.getDeclaredField(fieldName);
+        } catch (NoSuchFieldException exception) {
+            throw new IllegalArgumentException(
+                    "No declared field " + fieldName + " on " + klass.getName(), exception);
+        }
+    }
+
+    private static long fieldArrayAddress(Class<?> klass) {
+        long fieldsAddress = UnsafeUtility.UNSAFE.getLong(klassPointer(klass) + fieldsOffset);
+        if (!isCurrentMetadataAddress(fieldsAddress)
+                && !INJECTED_FIELD_ARRAYS.contains(fieldsAddress)) {
+            throw new IllegalStateException("InstanceKlass does not contain a field array");
+        }
+        fieldArrayLength(fieldsAddress);
+        return fieldsAddress;
+    }
+
+    private static int fieldArrayLength(long fieldsAddress) {
+        if (!looksLikeNativePointer(fieldsAddress)) {
+            throw new IllegalStateException("Invalid HotSpot field array address");
+        }
+
+        int fieldSlots = UnsafeUtility.UNSAFE.getInt(fieldsAddress + ARRAY_LENGTH_OFFSET);
+        if (fieldSlots < 0 || fieldSlots > MAX_FIELD_SLOTS || fieldSlots % FIELD_SLOTS != 0) {
+            throw new IllegalStateException("Invalid HotSpot field array length " + fieldSlots);
+        }
+        return fieldSlots;
+    }
+
+    private static int findFieldIndex(Class<?> klass, long fieldsAddress, Field field) {
+        int fieldSlots = fieldArrayLength(fieldsAddress);
+        String descriptor = descriptor(field.getType());
+        for (int fieldIndex = 0; fieldIndex < fieldSlots / FIELD_SLOTS; fieldIndex++) {
+            String candidateName = constantPoolUtf8At(
+                    klass, unsignedShort(readFieldInfo(fieldsAddress, fieldIndex, FIELD_NAME_INDEX_OFFSET)));
+            if (!field.getName().equals(candidateName)) {
+                continue;
+            }
+
+            String candidateDescriptor = constantPoolUtf8At(
+                    klass,
+                    unsignedShort(readFieldInfo(
+                            fieldsAddress, fieldIndex, FIELD_SIGNATURE_INDEX_OFFSET)));
+            if (descriptor.equals(candidateDescriptor)) {
+                return fieldIndex;
+            }
+        }
+        throw new IllegalStateException(
+                "Could not locate HotSpot field metadata for " + field);
+    }
+
+    private static short[] copyFieldInfo(long fieldsAddress, int fieldIndex) {
+        fieldArrayLength(fieldsAddress);
+        long fieldAddress = fieldInfoAddress(fieldsAddress, fieldIndex);
+        short[] fieldInfo = new short[FIELD_SLOTS];
+        for (int slot = 0; slot < FIELD_SLOTS; slot++) {
+            fieldInfo[slot] = UnsafeUtility.UNSAFE.getShort(
+                    fieldAddress + (long) slot * Short.BYTES);
+        }
+        return fieldInfo;
+    }
+
+    private static short readFieldInfo(long fieldsAddress, int fieldIndex, int fieldInfoOffset) {
+        if (fieldInfoOffset < 0 || fieldInfoOffset >= FIELD_SLOTS) {
+            throw new IllegalArgumentException("Invalid HotSpot field metadata offset " + fieldInfoOffset);
+        }
+        return UnsafeUtility.UNSAFE.getShort(
+                fieldInfoAddress(fieldsAddress, fieldIndex)
+                        + (long) fieldInfoOffset * Short.BYTES);
+    }
+
+    private static long fieldInfoAddress(long fieldsAddress, int fieldIndex) {
+        int fieldSlots = fieldArrayLength(fieldsAddress);
+        int fieldCount = fieldSlots / FIELD_SLOTS;
+        if (fieldIndex < 0 || fieldIndex >= fieldCount) {
+            throw new IllegalArgumentException("Invalid HotSpot field index " + fieldIndex);
+        }
+        return fieldsAddress + SHORT_ARRAY_ELEMENTS_OFFSET
+                + (long) fieldIndex * FIELD_SLOTS * Short.BYTES;
+    }
+
+    private static long expandedFieldArray(long originalFieldsAddress, short[] fieldInfo) {
+        if (fieldInfo.length != FIELD_SLOTS) {
+            throw new IllegalArgumentException("Invalid HotSpot field metadata size");
+        }
+        int originalFieldSlots = fieldArrayLength(originalFieldsAddress);
+        if (originalFieldSlots > MAX_FIELD_SLOTS - FIELD_SLOTS) {
+            throw new IllegalStateException("Target class has too many fields to add another one");
+        }
+
+        int replacementFieldSlots = originalFieldSlots + FIELD_SLOTS;
+        long byteCount = SHORT_ARRAY_ELEMENTS_OFFSET + (long) replacementFieldSlots * Short.BYTES;
+        long replacementFieldsAddress = UnsafeUtility.UNSAFE.allocateMemory(byteCount);
+        UnsafeUtility.UNSAFE.setMemory(replacementFieldsAddress, byteCount, (byte) 0);
+        UnsafeUtility.UNSAFE.putInt(
+                replacementFieldsAddress + ARRAY_LENGTH_OFFSET, replacementFieldSlots);
+        UnsafeUtility.UNSAFE.copyMemory(
+                null,
+                originalFieldsAddress + SHORT_ARRAY_ELEMENTS_OFFSET,
+                null,
+                replacementFieldsAddress + SHORT_ARRAY_ELEMENTS_OFFSET,
+                (long) originalFieldSlots * Short.BYTES);
+        long addedFieldAddress = replacementFieldsAddress + SHORT_ARRAY_ELEMENTS_OFFSET
+                + (long) originalFieldSlots * Short.BYTES;
+        for (int slot = 0; slot < FIELD_SLOTS; slot++) {
+            UnsafeUtility.UNSAFE.putShort(
+                    addedFieldAddress + (long) slot * Short.BYTES, fieldInfo[slot]);
+        }
+        return replacementFieldsAddress;
+    }
+
+    private static long compactFieldArray(long originalFieldsAddress, int removedFieldIndex) {
+        int originalFieldSlots = fieldArrayLength(originalFieldsAddress);
+        int originalFieldCount = originalFieldSlots / FIELD_SLOTS;
+        if (removedFieldIndex < 0 || removedFieldIndex >= originalFieldCount) {
+            throw new IllegalArgumentException("Invalid HotSpot field index " + removedFieldIndex);
+        }
+
+        int replacementFieldSlots = originalFieldSlots - FIELD_SLOTS;
+        long byteCount = SHORT_ARRAY_ELEMENTS_OFFSET + (long) replacementFieldSlots * Short.BYTES;
+        long replacementFieldsAddress = UnsafeUtility.UNSAFE.allocateMemory(byteCount);
+        UnsafeUtility.UNSAFE.setMemory(replacementFieldsAddress, byteCount, (byte) 0);
+        UnsafeUtility.UNSAFE.putInt(
+                replacementFieldsAddress + ARRAY_LENGTH_OFFSET, replacementFieldSlots);
+
+        int destinationSlot = 0;
+        for (int sourceFieldIndex = 0; sourceFieldIndex < originalFieldCount; sourceFieldIndex++) {
+            if (sourceFieldIndex == removedFieldIndex) {
+                continue;
+            }
+            long sourceFieldAddress = fieldInfoAddress(originalFieldsAddress, sourceFieldIndex);
+            long destinationFieldAddress = replacementFieldsAddress + SHORT_ARRAY_ELEMENTS_OFFSET
+                    + (long) destinationSlot * Short.BYTES;
+            UnsafeUtility.UNSAFE.copyMemory(
+                    null,
+                    sourceFieldAddress,
+                    null,
+                    destinationFieldAddress,
+                    (long) FIELD_SLOTS * Short.BYTES);
+            destinationSlot += FIELD_SLOTS;
+        }
+        return replacementFieldsAddress;
+    }
+
+    private static void replaceFieldArrayAndVerify(
+            Class<?> klass,
+            long originalFieldsAddress,
+            long replacementFieldsAddress,
+            Runnable verifier) {
+        long klassAddress = klassPointer(klass);
+        long fieldArrayPointerAddress = klassAddress + fieldsOffset;
+        long javaFieldCountAddress = klassAddress + javaFieldsCountOffset;
+        short originalFieldCount = UnsafeUtility.UNSAFE.getShort(javaFieldCountAddress);
+        short replacementFieldCount = unsignedShort(
+                fieldArrayLength(replacementFieldsAddress) / FIELD_SLOTS);
+        boolean removesField = Short.toUnsignedInt(replacementFieldCount)
+                < Short.toUnsignedInt(originalFieldCount);
+
+        if (removesField) {
+            UnsafeUtility.UNSAFE.putShortVolatile(null, javaFieldCountAddress, replacementFieldCount);
+        }
+        UnsafeUtility.UNSAFE.putLongVolatile(null, fieldArrayPointerAddress, replacementFieldsAddress);
+        if (!removesField) {
+            UnsafeUtility.UNSAFE.putShortVolatile(null, javaFieldCountAddress, replacementFieldCount);
+        }
+        try {
+            clearReflectionData(klass);
+            verifier.run();
+            INJECTED_FIELD_ARRAYS.add(replacementFieldsAddress);
+        } catch (RuntimeException | Error exception) {
+            if (!removesField) {
+                UnsafeUtility.UNSAFE.putShortVolatile(null, javaFieldCountAddress, originalFieldCount);
+            }
+            UnsafeUtility.UNSAFE.putLongVolatile(null, fieldArrayPointerAddress, originalFieldsAddress);
+            if (removesField) {
+                UnsafeUtility.UNSAFE.putShortVolatile(null, javaFieldCountAddress, originalFieldCount);
+            }
+            clearReflectionData(klass);
+            UnsafeUtility.UNSAFE.freeMemory(replacementFieldsAddress);
+            throw exception;
+        }
+    }
+
+    private static void ensureClassInitialized(Class<?> klass) {
+        try {
+            Class.forName(klass.getName(), true, klass.getClassLoader());
+        } catch (ClassNotFoundException exception) {
+            throw new IllegalStateException("Could not initialize " + klass.getName(), exception);
+        }
+    }
+
+    private static void verifyAddedField(
+            Class<?> klass, String fieldName, Class<?> fieldType, int modifiers) {
+        Field addedField = requireDeclaredField(klass, fieldName);
+        if (addedField.getType() != fieldType
+                || (addedField.getModifiers() & HOTSPOT_FIELD_MODIFIER_MASK) != modifiers) {
+            throw new IllegalStateException(
+                    "HotSpot did not expose the added field as " + klass.getName() + "." + fieldName);
+        }
+    }
+
+    private static void verifyRemovedField(Class<?> klass, String fieldName) {
+        try {
+            klass.getDeclaredField(fieldName);
+            throw new IllegalStateException(
+                    "HotSpot still exposes removed field " + klass.getName() + "." + fieldName);
+        } catch (NoSuchFieldException expected) {
+            // The reflection view now follows the replacement field array.
+        }
+    }
+
+    private static void verifyModifiedField(Class<?> klass, String fieldName, int modifiers) {
+        Field modifiedField = requireDeclaredField(klass, fieldName);
+        if ((modifiedField.getModifiers() & HOTSPOT_FIELD_MODIFIER_MASK) != modifiers) {
+            throw new IllegalStateException(
+                    "HotSpot did not expose the updated modifiers for "
+                            + klass.getName() + "." + fieldName);
+        }
+    }
+
+    private static short mergedFieldModifiers(short originalAccessFlags, int modifiers) {
+        int mergedAccessFlags = unsignedShort(originalAccessFlags) & ~HOTSPOT_FIELD_MODIFIER_MASK;
+        mergedAccessFlags |= modifiers;
+        return unsignedShort(mergedAccessFlags);
+    }
+
+    private static short unsignedShort(int value) {
+        if (value < 0 || value > 0xFFFF) {
+            throw new IllegalArgumentException("Value does not fit in a HotSpot u2: " + value);
+        }
+        return (short) value;
+    }
+
+    private static int unsignedShort(short value) {
+        return Short.toUnsignedInt(value);
+    }
+
+    private static int findConstantPoolUtf8Index(Class<?> klass, String value) {
+        Object constantPool = constantPool(klass);
+        int constantPoolSize = constantPoolSize(constantPool);
+        for (int index = 1; index < constantPoolSize; index++) {
+            String candidate = constantPoolUtf8At(constantPool, index);
+            if (value.equals(candidate)) {
+                return index;
+            }
+        }
+        throw new IllegalArgumentException(
+                "The constant pool of " + klass.getName()
+                        + " does not contain the UTF-8 constant " + value);
+    }
+
+    private static String constantPoolUtf8At(Class<?> klass, int index) {
+        return constantPoolUtf8At(constantPool(klass), index);
+    }
+
+    private static Object constantPool(Class<?> klass) {
+        try {
+            return classGetConstantPool.invoke(klass);
+        } catch (Throwable throwable) {
+            throw new IllegalStateException(
+                    "Could not access the constant pool of " + klass.getName(), throwable);
+        }
+    }
+
+    private static int constantPoolSize(Object constantPool) {
+        try {
+            return (int) constantPoolGetSize.invoke(constantPool);
+        } catch (Throwable throwable) {
+            throw new IllegalStateException("Could not read the constant pool size", throwable);
+        }
+    }
+
+    private static String constantPoolUtf8At(Object constantPool, int index) {
+        try {
+            return (String) constantPoolGetUtf8At.invoke(constantPool, index);
+        } catch (IllegalArgumentException exception) {
+            return null;
+        } catch (Throwable throwable) {
+            throw new IllegalStateException(
+                    "Could not read constant-pool UTF-8 entry " + index, throwable);
+        }
+    }
+
+    private static String descriptor(Class<?> type) {
+        if (type.isPrimitive()) {
+            if (type == void.class) return "V";
+            if (type == boolean.class) return "Z";
+            if (type == byte.class) return "B";
+            if (type == char.class) return "C";
+            if (type == short.class) return "S";
+            if (type == int.class) return "I";
+            if (type == long.class) return "J";
+            if (type == float.class) return "F";
+            if (type == double.class) return "D";
+            throw new IllegalArgumentException("Unsupported primitive field type " + type);
+        }
+        if (type.isArray()) {
+            return type.getName().replace('.', '/');
+        }
+        return "L" + type.getName().replace('.', '/') + ";";
     }
 
     private static Class<?> createDonorClass(String callbackId, String methodName) {
@@ -1228,7 +1694,20 @@ public class SeraLegitHook {
             try {
                 verifyRuntime();
                 directMethodHandleClass = Class.forName("java.lang.invoke.DirectMethodHandle");
+                constantPoolClass = Class.forName("jdk.internal.reflect.ConstantPool");
                 Class<?> memberName = Class.forName("java.lang.invoke.MemberName");
+                classGetConstantPool = UnsafeUtility.TRUSTED_LOOKUP.findVirtual(
+                        Class.class,
+                        "getConstantPool",
+                        MethodType.methodType(constantPoolClass));
+                constantPoolGetSize = UnsafeUtility.TRUSTED_LOOKUP.findVirtual(
+                        constantPoolClass,
+                        "getSize",
+                        MethodType.methodType(int.class));
+                constantPoolGetUtf8At = UnsafeUtility.TRUSTED_LOOKUP.findVirtual(
+                        constantPoolClass,
+                        "getUTF8At",
+                        MethodType.methodType(String.class, int.class));
 
                 Field directMember = declaredField(directMethodHandleClass, "member");
                 Field resolvedMethod = declaredField(memberName, "method");
@@ -1246,6 +1725,8 @@ public class SeraLegitHook {
                 verifyLayout();
                 verifyVtableLayout();
                 verifyMethodTableLayout();
+                verifyFieldTableLayout();
+                verifyJavaFieldsCountLayout();
                 initialized = true;
             } catch (Exception e) {
                 throw new IllegalStateException("JDK 17 HotSpot Unsafe hook is unavailable", e);
@@ -1256,7 +1737,7 @@ public class SeraLegitHook {
     private static void verifyRuntime() {
         if (!"17".equals(System.getProperty("java.specification.version"))) {
             throw new IllegalStateException(
-                    "SeraphinaHook.addMethod only supports JDK 17, found "
+                    "SeraLegitHook only supports JDK 17, found "
                             + System.getProperty("java.specification.version"));
         }
         String vmName = System.getProperty("java.vm.name", "");
@@ -1358,6 +1839,107 @@ public class SeraLegitHook {
             throw new IllegalStateException("Could not locate InstanceKlass::_methods");
         }
         methodsOffset = resolvedMethodsOffset;
+    }
+
+    private static void verifyFieldTableLayout() {
+        Class<?> probeClass = FieldTableLayoutProbe.class;
+        List<FieldLayoutExpectation> expectedFields = new ArrayList<>();
+        for (Field field : probeClass.getDeclaredFields()) {
+            int fieldOffset = Modifier.isStatic(field.getModifiers())
+                    ? (int) UnsafeUtility.UNSAFE.staticFieldOffset(field)
+                    : (int) UnsafeUtility.UNSAFE.objectFieldOffset(field);
+            expectedFields.add(new FieldLayoutExpectation(field.getModifiers(), fieldOffset));
+        }
+        if (expectedFields.isEmpty()) {
+            throw new IllegalStateException("Field table probe does not declare fields");
+        }
+
+        long probeKlassAddress = klassPointer(probeClass);
+        long resolvedFieldsOffset = 0L;
+        for (long offset = 0L;
+             offset <= INSTANCE_KLASS_LAYOUT_SCAN_BYTES - Long.BYTES;
+             offset += Long.BYTES) {
+            long fieldArrayAddress = UnsafeUtility.UNSAFE.getLong(probeKlassAddress + offset);
+            if (!isCurrentMetadataAddress(fieldArrayAddress)) {
+                continue;
+            }
+
+            int fieldSlots = UnsafeUtility.UNSAFE.getInt(fieldArrayAddress + ARRAY_LENGTH_OFFSET);
+            if (fieldSlots != expectedFields.size() * FIELD_SLOTS
+                    || !matchesFieldTable(fieldArrayAddress, expectedFields)) {
+                continue;
+            }
+            if (resolvedFieldsOffset != 0L) {
+                throw new IllegalStateException("Could not uniquely locate InstanceKlass::_fields");
+            }
+            resolvedFieldsOffset = offset;
+        }
+
+        if (resolvedFieldsOffset == 0L) {
+            throw new IllegalStateException("Could not locate InstanceKlass::_fields");
+        }
+        fieldsOffset = resolvedFieldsOffset;
+    }
+
+    private static void verifyJavaFieldsCountLayout() {
+        Class<?> baseProbeClass = FieldTableLayoutProbe.class;
+        Class<?> extendedProbeClass = FieldCountExtendedLayoutProbe.class;
+        Class<?> layoutControlProbeClass = FieldCountStaticLayoutProbe.class;
+        int baseFieldCount = baseProbeClass.getDeclaredFields().length;
+        int extendedFieldCount = extendedProbeClass.getDeclaredFields().length;
+        int layoutControlFieldCount = layoutControlProbeClass.getDeclaredFields().length;
+        if (baseFieldCount == extendedFieldCount || baseFieldCount != layoutControlFieldCount) {
+            throw new IllegalStateException("Invalid field-count probe layout");
+        }
+
+        long baseProbeKlassAddress = klassPointer(baseProbeClass);
+        long extendedProbeKlassAddress = klassPointer(extendedProbeClass);
+        long layoutControlProbeKlassAddress = klassPointer(layoutControlProbeClass);
+        long resolvedJavaFieldsCountOffset = 0L;
+        for (long offset = 0L;
+             offset <= INSTANCE_KLASS_LAYOUT_SCAN_BYTES - Short.BYTES;
+             offset += Short.BYTES) {
+            int baseValue = unsignedShort(UnsafeUtility.UNSAFE.getShort(baseProbeKlassAddress + offset));
+            int extendedValue = unsignedShort(
+                    UnsafeUtility.UNSAFE.getShort(extendedProbeKlassAddress + offset));
+            int layoutControlValue = unsignedShort(
+                    UnsafeUtility.UNSAFE.getShort(layoutControlProbeKlassAddress + offset));
+            if (baseValue != baseFieldCount
+                    || extendedValue != extendedFieldCount
+                    || layoutControlValue != layoutControlFieldCount) {
+                continue;
+            }
+            if (resolvedJavaFieldsCountOffset != 0L) {
+                throw new IllegalStateException(
+                        "Could not uniquely locate InstanceKlass::_java_fields_count");
+            }
+            resolvedJavaFieldsCountOffset = offset;
+        }
+
+        if (resolvedJavaFieldsCountOffset == 0L) {
+            throw new IllegalStateException("Could not locate InstanceKlass::_java_fields_count");
+        }
+        javaFieldsCountOffset = resolvedJavaFieldsCountOffset;
+    }
+
+    private static boolean matchesFieldTable(
+            long fieldArrayAddress, List<FieldLayoutExpectation> expectedFields) {
+        Set<FieldLayoutExpectation> unmatchedFields = new HashSet<>(expectedFields);
+        for (int fieldIndex = 0; fieldIndex < expectedFields.size(); fieldIndex++) {
+            long fieldAddress = fieldArrayAddress + SHORT_ARRAY_ELEMENTS_OFFSET
+                    + (long) fieldIndex * FIELD_SLOTS * Short.BYTES;
+            int accessFlags = unsignedShort(UnsafeUtility.UNSAFE.getShort(
+                    fieldAddress + (long) FIELD_ACCESS_FLAGS_OFFSET * Short.BYTES));
+            int packedOffset = unsignedShort(UnsafeUtility.UNSAFE.getShort(
+                    fieldAddress + (long) FIELD_LOW_PACKED_OFFSET * Short.BYTES))
+                    | unsignedShort(UnsafeUtility.UNSAFE.getShort(
+                    fieldAddress + (long) FIELD_HIGH_PACKED_OFFSET * Short.BYTES)) << Short.SIZE;
+            int fieldOffset = packedOffset >>> 2;
+            if (!unmatchedFields.remove(new FieldLayoutExpectation(accessFlags, fieldOffset))) {
+                return false;
+            }
+        }
+        return unmatchedFields.isEmpty();
     }
 
     private static void verifyLayout() throws Exception {
@@ -1569,6 +2151,25 @@ public class SeraLegitHook {
         }
     }
 
+    private static final class FieldTableLayoutProbe {
+        private static int staticField;
+        private long instanceLongField;
+        private Object instanceObjectField;
+    }
+
+    private static final class FieldCountExtendedLayoutProbe {
+        private static int staticField;
+        private long instanceLongField;
+        private Object instanceObjectField;
+        private int extraInstanceIntField;
+    }
+
+    private static final class FieldCountStaticLayoutProbe {
+        private static int staticIntField;
+        private static long staticLongField;
+        private static Object staticObjectField;
+    }
+
     private static final class ReferenceSlot {
         private volatile Object value;
     }
@@ -1581,6 +2182,9 @@ public class SeraLegitHook {
         private Class<?> define(String className, byte[] bytecode) {
             return defineClass(className, bytecode, 0, bytecode.length);
         }
+    }
+
+    private record FieldLayoutExpectation(int accessFlags, int offset) {
     }
 
     private record InjectedMethod(Class<?> donorClass, long methodArrayAddress) {
