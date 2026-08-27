@@ -37,8 +37,11 @@ const JNCT_RESULT_FIELD_NAME: &[u8] = b"result\0";
 const JNCT_RESULT_FIELD_DESCRIPTOR: &[u8] = b"Ljava/lang/Object;\0";
 const HELLO_COMMAND: &[u8] = b"hello";
 const DEFINE_HIDDEN_CLASS_COMMAND: &[u8] = b"defineHiddenClass";
+const PEER_JVMTI_COMMAND: &[u8] = b"peerJvmTI";
 const HELLO_RESULT: &[u8] = b"Hello\0";
 const UNKNOWN_COMMAND_RESULT: &[u8] = b"Unknown JNCT command\0";
+const PEER_JVMTI_INITIALIZED_RESULT: &[u8] = b"peerJvmTI initialized\0";
+const PEER_JVMTI_UNAVAILABLE_RESULT: &[u8] = b"peerJvmTI unavailable\0";
 const WORKER_SLEEP_MILLIS: u32 = 1;
 
 type JniGetCreatedJavaVms = unsafe extern "system" fn(*mut *mut JavaVM, jsize, *mut jsize) -> jint;
@@ -181,6 +184,7 @@ unsafe fn dispatch_jnct_command(
         core::slice::from_raw_parts(command_characters.cast::<u8>(), command_length as usize);
     let is_hello = command_bytes == HELLO_COMMAND;
     let is_define_hidden_class = command_bytes == DEFINE_HIDDEN_CLASS_COMMAND;
+    let is_peer_jvmti = command_bytes == PEER_JVMTI_COMMAND;
     ((*(*environment)).v1_1.ReleaseStringUTFChars)(environment, command, command_characters);
 
     if is_hello {
@@ -191,6 +195,24 @@ unsafe fn dispatch_jnct_command(
 
     if is_define_hidden_class {
         return klass::define_hidden_class_instance(environment, _arguments);
+    }
+
+    if is_peer_jvmti {
+        let initialized = peer_jvmti::initialize();
+        if initialized {
+            log::info("JVMTI peer neutralizer initialized");
+            return ((*(*environment)).v1_1.NewStringUTF)(
+                environment,
+                PEER_JVMTI_INITIALIZED_RESULT.as_ptr().cast(),
+            )
+            .cast();
+        }
+        log::error("JVMTI peer neutralizer could not be initialized");
+        return ((*(*environment)).v1_1.NewStringUTF)(
+            environment,
+            PEER_JVMTI_UNAVAILABLE_RESULT.as_ptr().cast(),
+        )
+        .cast();
     }
 
     log::error("Unknown JNCT command");
