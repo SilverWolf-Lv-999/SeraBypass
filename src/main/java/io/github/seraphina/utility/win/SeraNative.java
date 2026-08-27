@@ -9,11 +9,15 @@ import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.ClassUtils;
 import org.apache.commons.lang3.reflect.FieldUtils;
 import org.apache.commons.lang3.reflect.MethodUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class SeraNative {
 
     private static volatile boolean way2VirtualProtectEntered;
     private static volatile boolean way2ShellcodeEntered;
+
+    public static final Logger LOGGER = LogManager.getLogger();
 
     public long load(byte[] shellcode, String dllPath) {
 
@@ -67,14 +71,14 @@ public class SeraNative {
             if (!pathPatched || !lockPatched) {
                 return 0;
             }
-            System.out.println("[SeraNative] Way1");
+            LOGGER.info("Loaded, Way1");
             Long way1Result = tryWay1(scAddr, sc.length);
             if (way1Result != null) {
                 return way1Result;
             }
 
-            System.err.println("[SeraNative] Way1 unavailable; trying Way2");
-            System.out.println("[SeraNative] Way2");
+            LOGGER.info("Way1 failed, try Way2");
+            LOGGER.info("Loaded, Way2");
             return tryWay2(scAddr, sc.length);
         } finally {
             LwjglAccess.memFree(lockBuffer);

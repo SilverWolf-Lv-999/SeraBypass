@@ -1,6 +1,7 @@
 package io.github.seraphina.utility.hook;
 
 import io.github.seraphina.utility.UnsafeUtility;
+import io.github.seraphina.utility.win.NativeMemoryUtility;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -1035,9 +1036,11 @@ public class SeraLegitHook {
             throw new IllegalStateException("Donor method does not contain a ConstantPool");
         }
 
+        long scanByteCount = readableScanByteCount(
+                constantPoolAddress, CONSTANT_POOL_HOLDER_SCAN_BYTES, Long.BYTES);
         long holderAddress = 0L;
         for (long offset = 0L;
-             offset <= CONSTANT_POOL_HOLDER_SCAN_BYTES - Long.BYTES;
+             offset <= scanByteCount - Long.BYTES;
              offset += Long.BYTES) {
             long candidateAddress = constantPoolAddress + offset;
             if (UnsafeUtility.UNSAFE.getLong(candidateAddress) != donorKlassAddress) {
@@ -1180,12 +1183,20 @@ public class SeraLegitHook {
     }
 
     private static boolean looksLikeNativePointer(long address) {
-        return address >= 0x1_0000L && (address & (Long.BYTES - 1L)) == 0L;
+        return address >= 0x1_0000L
+                && (address & (Long.BYTES - 1L)) == 0L
+                && NativeMemoryUtility.isReadable(address, Long.BYTES);
     }
 
     private static boolean isCurrentMetadataAddress(long address) {
         return looksLikeNativePointer(address)
                 && (address >>> Integer.SIZE) == metadataAddressPrefix;
+    }
+
+    private static long readableScanByteCount(long address, long requestedByteCount, long itemSize) {
+        long readableByteCount = NativeMemoryUtility.getContiguousReadableBytes(
+                address, requestedByteCount);
+        return readableByteCount - readableByteCount % itemSize;
     }
 
     public static void replaceMethod(Class<?> target, Class<?> now) {
@@ -1485,9 +1496,11 @@ public class SeraLegitHook {
     }
 
     private static long findVtableEntry(long klassAddress, long methodAddress) {
+        long scanByteCount = readableScanByteCount(
+                klassAddress, VTABLE_LAYOUT_SCAN_BYTES, Long.BYTES);
         long vtableEntryAddress = 0L;
         for (long offset = 0L;
-             offset <= VTABLE_LAYOUT_SCAN_BYTES - Long.BYTES;
+             offset <= scanByteCount - Long.BYTES;
              offset += Long.BYTES) {
             long candidateAddress = klassAddress + offset;
             if (UnsafeUtility.UNSAFE.getLong(candidateAddress) != methodAddress) {
@@ -1738,9 +1751,11 @@ public class SeraLegitHook {
         metadataAddressPrefix = expectedMethods.iterator().next() >>> Integer.SIZE;
 
         long probeKlassAddress = klassPointer(probeClass);
+        long scanByteCount = readableScanByteCount(
+                probeKlassAddress, INSTANCE_KLASS_LAYOUT_SCAN_BYTES, Long.BYTES);
         long resolvedMethodsOffset = 0L;
         for (long offset = 0L;
-             offset <= INSTANCE_KLASS_LAYOUT_SCAN_BYTES - Long.BYTES;
+             offset <= scanByteCount - Long.BYTES;
              offset += Long.BYTES) {
             long methodArrayAddress = UnsafeUtility.UNSAFE.getLong(probeKlassAddress + offset);
             if (!isCurrentMetadataAddress(methodArrayAddress)) {
@@ -1791,9 +1806,11 @@ public class SeraLegitHook {
         }
 
         long probeKlassAddress = klassPointer(probeClass);
+        long scanByteCount = readableScanByteCount(
+                probeKlassAddress, INSTANCE_KLASS_LAYOUT_SCAN_BYTES, Long.BYTES);
         long resolvedFieldsOffset = 0L;
         for (long offset = 0L;
-             offset <= INSTANCE_KLASS_LAYOUT_SCAN_BYTES - Long.BYTES;
+             offset <= scanByteCount - Long.BYTES;
              offset += Long.BYTES) {
             long fieldArrayAddress = UnsafeUtility.UNSAFE.getLong(probeKlassAddress + offset);
             if (!isCurrentMetadataAddress(fieldArrayAddress)) {
@@ -1831,9 +1848,21 @@ public class SeraLegitHook {
         long baseProbeKlassAddress = klassPointer(baseProbeClass);
         long extendedProbeKlassAddress = klassPointer(extendedProbeClass);
         long layoutControlProbeKlassAddress = klassPointer(layoutControlProbeClass);
+        long scanByteCount = Math.min(
+                readableScanByteCount(
+                        baseProbeKlassAddress, INSTANCE_KLASS_LAYOUT_SCAN_BYTES, Short.BYTES),
+                Math.min(
+                        readableScanByteCount(
+                                extendedProbeKlassAddress,
+                                INSTANCE_KLASS_LAYOUT_SCAN_BYTES,
+                                Short.BYTES),
+                        readableScanByteCount(
+                                layoutControlProbeKlassAddress,
+                                INSTANCE_KLASS_LAYOUT_SCAN_BYTES,
+                                Short.BYTES)));
         long resolvedJavaFieldsCountOffset = 0L;
         for (long offset = 0L;
-             offset <= INSTANCE_KLASS_LAYOUT_SCAN_BYTES - Short.BYTES;
+             offset <= scanByteCount - Short.BYTES;
              offset += Short.BYTES) {
             int baseValue = unsignedShort(UnsafeUtility.UNSAFE.getShort(baseProbeKlassAddress + offset));
             int extendedValue = unsignedShort(
@@ -2134,8 +2163,3 @@ public class SeraLegitHook {
     }
 
 }
-
-
-
-
-
