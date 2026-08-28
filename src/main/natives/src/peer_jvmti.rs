@@ -6,7 +6,7 @@ use core::mem::{size_of, transmute};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use jni_sys::{jint, jsize, JavaVM, JNI_OK};
+use jni_sys::{JNI_OK, JavaVM, jint, jsize};
 
 const JVM_DLL_NAME: &[u16] = &[
     b'j' as u16,
@@ -23,7 +23,27 @@ const JNI_GET_CREATED_JAVA_VMS: &[u8] = b"JNI_GetCreatedJavaVMs\0";
 const JVMTI_MAGIC: u32 = 0x71EE;
 const JVMTI_BAD_MAGIC: u32 = 0xDEAD;
 const JVMTI_DISPOSED_MAGIC: u32 = 0xDEFC;
+const JVMTI_CLEARED_MAGIC: u32 = 0;
+const JVMTI_ERROR_NONE: i32 = 0;
+const JVMTI_ERROR_ACCESS_DENIED: i32 = 111;
 const JVMTI_VERSIONS: [jint; 3] = [0x3001_0200, 0x3001_0100, 0x3001_0000];
+
+// These are zero-based slots in jvmtiInterface_1_.  Keep this list in sync with
+// the JVMTI ABI instead of using a guessed table index for output-bearing calls.
+const JVMTI_SET_EVENT_NOTIFICATION_MODE_SLOT: usize = 1;
+const JVMTI_SET_BREAKPOINT_SLOT: usize = 37;
+const JVMTI_SET_FIELD_ACCESS_WATCH_SLOT: usize = 40;
+const JVMTI_SET_FIELD_MODIFICATION_WATCH_SLOT: usize = 42;
+const JVMTI_SET_NATIVE_METHOD_PREFIX_SLOT: usize = 72;
+const JVMTI_SET_NATIVE_METHOD_PREFIXES_SLOT: usize = 73;
+const JVMTI_REDEFINE_CLASSES_SLOT: usize = 86;
+const JVMTI_GET_OBJECTS_WITH_TAGS_SLOT: usize = 113;
+const JVMTI_SET_JNI_FUNCTION_TABLE_SLOT: usize = 119;
+const JVMTI_SET_EVENT_CALLBACKS_SLOT: usize = 121;
+const JVMTI_DISPOSE_ENVIRONMENT_SLOT: usize = 126;
+const JVMTI_ADD_CAPABILITIES_SLOT: usize = 141;
+const JVMTI_RELINQUISH_CAPABILITIES_SLOT: usize = 142;
+const JVMTI_RETRANSFORM_CLASSES_SLOT: usize = 151;
 
 const MAX_CHAIN_STEPS: usize = 64;
 const MAX_LAYOUT_CANDIDATES: usize = 512;
@@ -71,7 +91,6 @@ struct Layout {
 #[derive(Clone, Copy)]
 struct ShadowTable {
     base: usize,
-    env: usize,
     table: usize,
     slots: usize,
     active: bool,
@@ -88,7 +107,6 @@ struct State {
     own_original_functions: usize,
     own_slots: usize,
     initialized: bool,
-    daemon_started: bool,
     next_head_retry: u64,
     shadows: [ShadowTable; MAX_TRACKED_ALIENS],
     shadow_count: usize,
@@ -97,7 +115,6 @@ struct State {
 impl State {
     const EMPTY_SHADOW: ShadowTable = ShadowTable {
         base: 0,
-        env: 0,
         table: 0,
         slots: 0,
         active: false,
@@ -115,7 +132,6 @@ impl State {
             own_original_functions: 0,
             own_slots: 0,
             initialized: false,
-            daemon_started: false,
             next_head_retry: 0,
             shadows: [Self::EMPTY_SHADOW; MAX_TRACKED_ALIENS],
             shadow_count: 0,
@@ -209,7 +225,8 @@ unsafe fn read_bytes(address: usize, destination: *mut u8, length: usize) -> boo
             destination.cast(),
             length,
             &mut transferred,
-        ) != 0 && transferred == length
+        ) != 0
+            && transferred == length
     }
 }
 
@@ -252,7 +269,8 @@ unsafe fn write_bytes(address: usize, source: *const u8, length: usize) -> bool 
             source.cast(),
             length,
             &mut transferred,
-        ) != 0 && transferred == length
+        ) != 0
+            && transferred == length
     }
 }
 
@@ -297,7 +315,20 @@ fn is_executable(address: usize) -> bool {
 }
 
 unsafe extern "system" fn noop_stub(_: *mut c_void) -> i32 {
-    0
+    JVMTI_ERROR_NONE
+}
+
+unsafe extern "system" fn deny_stub(_: *mut c_void) -> i32 {
+    JVMTI_ERROR_ACCESS_DENIED
+}
+
+unsafe extern "system" fn set_event_notification_mode_stub(
+    _: *mut c_void,
+    _: jint,
+    _: jint,
+    _: *mut c_void,
+) -> i32 {
+    JVMTI_ERROR_NONE
 }
 
 unsafe extern "system" fn empty_get_objects_with_tags_stub(
@@ -317,7 +348,7 @@ unsafe extern "system" fn empty_get_objects_with_tags_stub(
     if !tags.is_null() {
         unsafe { *tags = ptr::null_mut() };
     }
-    0
+    JVMTI_ERROR_NONE
 }
 
 fn is_likely_functions(functions: usize) -> bool {
@@ -402,39 +433,82 @@ unsafe fn copy_vtable(source: usize) -> Option<(usize, usize)> {
     Some((table, slots))
 }
 
-unsafe fn neutralize_vtable(table: usize, slots: usize) {
+fn is_silent_noop_slot(slot: usize) -> bool {
+    matches!(
+        slot,
+        JVMTI_SET_EVENT_NOTIFICATION_MODE_SLOT
+            | JVMTI_SET_BREAKPOINT_SLOT
+            | JVMTI_SET_FIELD_ACCESS_WATCH_SLOT
+            | JVMTI_SET_FIELD_MODIFICATION_WATCH_SLOT
+            | JVMTI_SET_NATIVE_METHOD_PREFIX_SLOT
+            | JVMTI_SET_NATIVE_METHOD_PREFIXES_SLOT
+            | JVMTI_REDEFINE_CLASSES_SLOT
+            | JVMTI_SET_JNI_FUNCTION_TABLE_SLOT
+            | JVMTI_SET_EVENT_CALLBACKS_SLOT
+            | JVMTI_ADD_CAPABILITIES_SLOT
+            | JVMTI_RELINQUISH_CAPABILITIES_SLOT
+            | JVMTI_RETRANSFORM_CLASSES_SLOT
+    )
+}
+
+unsafe fn neutralize_external_vtable(table: usize, slots: usize) {
     if table == 0 {
         return;
     }
-    let noop = noop_stub as usize;
+    let noop = noop_stub as *const () as usize;
+    let deny = deny_stub as *const () as usize;
+    let set_event_notification = set_event_notification_mode_stub as *const () as usize;
+    let empty_get_objects = empty_get_objects_with_tags_stub as *const () as usize;
     for slot in 0..slots {
         let address = table + slot * POINTER_SIZE;
-        if unsafe { read_pointer(address) }.unwrap_or(0) != 0 {
-            unsafe { ptr::write_volatile(address as *mut usize, noop) };
+        if unsafe { read_pointer(address) }.unwrap_or(0) == 0 {
+            continue;
         }
+        let replacement = if slot == JVMTI_SET_EVENT_NOTIFICATION_MODE_SLOT {
+            set_event_notification
+        } else if slot == JVMTI_GET_OBJECTS_WITH_TAGS_SLOT {
+            empty_get_objects
+        } else if is_silent_noop_slot(slot) {
+            noop
+        } else {
+            deny
+        };
+        unsafe { ptr::write_volatile(address as *mut usize, replacement) };
     }
-    // JVMTI function number 121 is GetObjectsWithTags (zero-based slot 120).
-    // Its output pointers must be cleared so callers do not consume garbage.
-    const GET_OBJECTS_WITH_TAGS_SLOT: usize = 120;
-    if GET_OBJECTS_WITH_TAGS_SLOT < slots {
-        unsafe {
-            ptr::write_volatile(
-                (table + GET_OBJECTS_WITH_TAGS_SLOT * POINTER_SIZE) as *mut usize,
-                empty_get_objects_with_tags_stub as usize,
-            );
-        }
+}
+
+unsafe fn protect_own_vtable(table: usize, slots: usize) {
+    if table == 0 || JVMTI_DISPOSE_ENVIRONMENT_SLOT >= slots {
+        return;
+    }
+    let address = table + JVMTI_DISPOSE_ENVIRONMENT_SLOT * POINTER_SIZE;
+    let noop = noop_stub as *const () as usize;
+    if unsafe { read_pointer(address) }.unwrap_or(0) != noop {
+        unsafe { ptr::write_volatile(address as *mut usize, noop) };
     }
 }
 
 fn is_plausible_base(base: usize, layout: Layout, allow_disposed: bool) -> bool {
-    if base < 0x10_000 || base.checked_add(layout.external_offset).is_none() {
+    if base < 0x10_000
+        || (base & (POINTER_SIZE - 1)) != 0
+        || base.checked_add(layout.external_offset).is_none()
+    {
+        return false;
+    }
+    if POINTER_SIZE == 8 && base > 0x0000_7FFF_FFFF_FFFF {
         return false;
     }
     let env = base + layout.external_offset;
-    let magic = unsafe { read_u32(env + layout.magic_offset) };
+    let magic_address = match env.checked_add(layout.magic_offset) {
+        Some(value) => value,
+        None => return false,
+    };
+    let magic = unsafe { read_u32(magic_address) };
     if magic != Some(JVMTI_MAGIC)
         && !(allow_disposed
-            && (magic == Some(JVMTI_BAD_MAGIC) || magic == Some(JVMTI_DISPOSED_MAGIC)))
+            && (magic == Some(JVMTI_BAD_MAGIC)
+                || magic == Some(JVMTI_DISPOSED_MAGIC)
+                || magic == Some(JVMTI_CLEARED_MAGIC)))
     {
         return false;
     }
@@ -538,7 +612,12 @@ fn build_layouts(seed_env: usize, output: &mut [Layout; MAX_LAYOUT_CANDIDATES]) 
 
 fn layout_rank(layout: Layout, chain_length: usize) -> usize {
     let expected = layout.external_offset + layout.magic_offset + 8;
-    chain_length * 10_000 + if layout.next_offset == expected { 500 } else { 0 }
+    chain_length * 10_000
+        + if layout.next_offset == expected {
+            500
+        } else {
+            0
+        }
 }
 
 fn scan_head_candidates(
@@ -563,11 +642,12 @@ fn scan_head_candidates(
     let section_headers = nt.checked_add(24 + optional_size)?;
     let mut target_bases = [0usize; MAX_LAYOUT_CANDIDATES];
     for index in 0..layout_count {
-        target_bases[index] = seed_env.checked_sub(layouts[index].external_offset).unwrap_or(0);
+        target_bases[index] = seed_env
+            .checked_sub(layouts[index].external_offset)
+            .unwrap_or(0);
     }
 
     let mut best_target: Option<(usize, Layout, usize)> = None;
-    let mut best_fallback: Option<(usize, Layout, usize)> = None;
     for section_index in 0..section_count {
         let header = section_headers + section_index * 40;
         let characteristics = unsafe { read_u32(header + 36) }.unwrap_or(0);
@@ -611,14 +691,15 @@ fn scan_head_candidates(
                     if best_target.map_or(true, |entry| rank > entry.2) {
                         best_target = Some((section_address + offset, layout, rank));
                     }
-                } else if best_fallback.map_or(true, |entry| rank > entry.2) {
-                    best_fallback = Some((section_address + offset, layout, rank));
                 }
             }
         }
         unsafe { VirtualFree(buffer as *mut c_void, 0, MEM_RELEASE) };
     }
-    best_target.or(best_fallback).map(|(head_ptr, layout, _)| (head_ptr, layout))
+    // Fail closed: a writable jvm.dll pointer that only resembles a JVMTI
+    // chain is not enough to justify modifying JVM memory.  Accept a head only
+    // when the candidate chain demonstrably reaches our live environment.
+    best_target.map(|(head_ptr, layout, _)| (head_ptr, layout))
 }
 
 fn resolve_head_pointer(seed_env: usize) -> bool {
@@ -666,7 +747,7 @@ unsafe fn get_jvmti_env(vm: *mut JavaVM) -> Option<usize> {
     }
     for version in JVMTI_VERSIONS {
         let mut environment: *mut c_void = ptr::null_mut();
-        let result = unsafe { ((*(*vm)).GetEnv)(vm, &mut environment, version) };
+        let result = unsafe { ((*(*vm)).v1_2.GetEnv)(vm, &mut environment, version) };
         if result == JNI_OK && !environment.is_null() {
             return Some(environment as usize);
         }
@@ -683,6 +764,13 @@ unsafe fn shield_own_environment() -> bool {
     if functions == 0 {
         return false;
     }
+    if current.own_shadow_table != 0
+        && functions != current.own_shadow_table
+        && functions != current.own_original_functions
+        && !is_likely_functions(functions)
+    {
+        return false;
+    }
     if current.own_shadow_table == 0 {
         let Some((table, slots)) = (unsafe { copy_vtable(functions) }) else {
             return false;
@@ -691,7 +779,7 @@ unsafe fn shield_own_environment() -> bool {
         current.own_shadow_table = table;
         current.own_slots = slots;
     }
-    unsafe { neutralize_vtable(current.own_shadow_table, current.own_slots) };
+    unsafe { protect_own_vtable(current.own_shadow_table, current.own_slots) };
     if functions != current.own_shadow_table {
         unsafe { write_pointer(current.our_env, current.own_shadow_table) }
     } else {
@@ -710,11 +798,28 @@ fn tracked_shadow(base: usize) -> Option<usize> {
     None
 }
 
+fn is_sweep_base(base: usize, layout: Layout) -> bool {
+    if is_plausible_base(base, layout, false) {
+        return true;
+    }
+    // A previously neutralized environment may still be linked while carrying
+    // one of HotSpot's known disposed markers.  Only accept that state for a
+    // base we already shadowed; unknown disposed-looking pointers remain a
+    // hard stop so a malformed chain cannot make us write arbitrary memory.
+    tracked_shadow(base).is_some() && is_plausible_base(base, layout, true)
+}
+
 unsafe fn shadow_alien_environment(base: usize) -> bool {
-    let external_offset = state().external_offset;
-    if external_offset == 0 && state().our_env == 0 {
+    let current = state();
+    let layout = Layout {
+        external_offset: current.external_offset,
+        magic_offset: current.magic_offset,
+        next_offset: current.next_offset,
+    };
+    if current.our_env == 0 || !is_plausible_base(base, layout, true) {
         return false;
     }
+    let external_offset = current.external_offset;
     let env = match base.checked_add(external_offset) {
         Some(value) => value,
         None => return false,
@@ -741,7 +846,6 @@ unsafe fn shadow_alien_environment(base: usize) -> bool {
         let index = state().shadow_count;
         state().shadows[index] = ShadowTable {
             base,
-            env,
             table,
             slots,
             active: true,
@@ -750,7 +854,7 @@ unsafe fn shadow_alien_environment(base: usize) -> bool {
         (table, slots, index)
     };
 
-    unsafe { neutralize_vtable(table, slots) };
+    unsafe { neutralize_external_vtable(table, slots) };
     let installed = functions == table || unsafe { write_pointer(env, table) };
     if installed {
         state().shadows[index].active = true;
@@ -784,15 +888,32 @@ unsafe fn heal_own_environment() {
     if current.our_env == 0 || current.head_ptr == 0 {
         return;
     }
-    let magic_address = current.our_env + current.magic_offset;
-    let magic = unsafe { read_u32(magic_address) }.unwrap_or(u32::MAX);
-    if magic == JVMTI_BAD_MAGIC || magic == JVMTI_DISPOSED_MAGIC || magic == 0 {
-        unsafe { write_u32(magic_address, JVMTI_MAGIC) };
-    }
+    let layout = Layout {
+        external_offset: current.external_offset,
+        magic_offset: current.magic_offset,
+        next_offset: current.next_offset,
+    };
     let own_base = match current.our_env.checked_sub(current.external_offset) {
         Some(value) => value,
         None => return,
     };
+    if !is_plausible_base(own_base, layout, true) {
+        return;
+    }
+    let magic_address = match current.our_env.checked_add(current.magic_offset) {
+        Some(value) => value,
+        None => return,
+    };
+    let magic = unsafe { read_u32(magic_address) }.unwrap_or(u32::MAX);
+    if magic != JVMTI_MAGIC {
+        if magic != JVMTI_BAD_MAGIC && magic != JVMTI_DISPOSED_MAGIC && magic != JVMTI_CLEARED_MAGIC
+        {
+            return;
+        }
+        if !unsafe { write_u32(magic_address, JVMTI_MAGIC) } {
+            return;
+        }
+    }
     let head = unsafe { read_pointer(current.head_ptr) }.unwrap_or(0);
     if head != 0 {
         let layout = Layout {
@@ -828,11 +949,11 @@ fn sweep_chain() -> usize {
     let mut previous = 0usize;
     let mut changed = 0usize;
     for _ in 0..MAX_CHAIN_STEPS {
-        if current_base == 0 || !is_plausible_base(current_base, layout, false) {
+        if current_base == 0 || !is_sweep_base(current_base, layout) {
             break;
         }
         let next = unsafe { read_pointer(current_base + current.next_offset) }.unwrap_or(0);
-        if current_base != own_base && tracked_shadow(current_base).is_none() {
+        if current_base != own_base {
             let link_address = if previous == 0 {
                 current.head_ptr
             } else {
@@ -905,7 +1026,6 @@ fn initialize_locked() -> bool {
             ptr::null_mut(),
         );
         if !handle.is_null() {
-            state().daemon_started = true;
             CloseHandle(handle);
         }
     }
@@ -946,13 +1066,13 @@ pub fn recover() -> usize {
     changed
 }
 
+#[allow(dead_code)]
 pub fn shutdown() {
     RUNNING.store(false, Ordering::Release);
     lock();
-    if state().our_env != 0 && state().own_original_functions != 0 {
-        unsafe { write_pointer(state().our_env, state().own_original_functions) };
-    }
-    // Do not free shadow tables: the JVM or another thread may still hold one.
+    // Do not restore or free JVM-owned structures during shutdown.  The JVM or
+    // another thread may still hold an environment/table; leaked shadow tables
+    // are reclaimed with the DLL and cannot become a use-after-free here.
     *state() = State::new();
     unlock();
 }
@@ -972,7 +1092,7 @@ unsafe extern "system" fn recovery_thread(_: *mut c_void) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Layout, JVMTI_MAGIC};
+    use super::{JVMTI_MAGIC, Layout};
 
     #[test]
     fn canonical_layout_rank_is_higher() {
