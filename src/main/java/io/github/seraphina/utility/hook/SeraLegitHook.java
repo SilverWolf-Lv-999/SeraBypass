@@ -1,5 +1,6 @@
 package io.github.seraphina.utility.hook;
 
+import io.github.seraphina.jnct.api.JVM;
 import io.github.seraphina.utility.UnsafeUtility;
 import io.github.seraphina.utility.win.NativeMemoryUtility;
 
@@ -17,35 +18,35 @@ import java.util.function.Consumer;
 
 public class SeraLegitHook {
 
-    private static final long RESOLVED_METHOD_NAME_VMTARGET_OFFSET = 16L;
-    private static final long METHOD_CONST_METHOD_OFFSET = 8L;
-    private static final long METHOD_VTABLE_INDEX_OFFSET = 44L;
-    private static final long CONST_METHOD_CONSTANTS_OFFSET = 8L;
-    private static final long CONST_METHOD_CODE_SIZE_OFFSET = 32L;
-    private static final long CONST_METHOD_NAME_INDEX_OFFSET = 34L;
-    private static final long CONST_METHOD_METHOD_IDNUM_OFFSET = 38L;
-    private static final long CONST_METHOD_ORIGINAL_METHOD_IDNUM_OFFSET = 46L;
-    private static final long CONST_METHOD_CODE_OFFSET = 48L;
-    private static final long CONSTANT_POOL_LENGTH_OFFSET = 60L;
-    private static final long CONSTANT_POOL_ENTRIES_OFFSET = 72L;
-    private static final long ARRAY_LENGTH_OFFSET = 0L;
-    private static final long SHORT_ARRAY_ELEMENTS_OFFSET = Integer.BYTES;
-    private static final long ARRAY_ELEMENTS_OFFSET = 8L;
-    private static final long SYMBOL_LENGTH_OFFSET = 4L;
-    private static final long SYMBOL_BODY_OFFSET = 6L;
-    private static final long CLASS_KLASS_OFFSET = 16L;
-    private static final long KLASS_JAVA_MIRROR_OFFSET = 112L;
-    private static final long KLASS_SUBKLASS_OFFSET = 128L;
-    private static final long KLASS_NEXT_SIBLING_OFFSET = 136L;
+    private static long RESOLVED_METHOD_NAME_VMTARGET_OFFSET;
+    private static long METHOD_CONST_METHOD_OFFSET;
+    private static long METHOD_VTABLE_INDEX_OFFSET;
+    private static long CONST_METHOD_CONSTANTS_OFFSET;
+    private static long CONST_METHOD_CODE_SIZE_OFFSET;
+    private static long CONST_METHOD_NAME_INDEX_OFFSET;
+    private static long CONST_METHOD_METHOD_IDNUM_OFFSET;
+    private static long CONST_METHOD_ORIGINAL_METHOD_IDNUM_OFFSET;
+    private static long CONST_METHOD_CODE_OFFSET;
+    private static long CONSTANT_POOL_LENGTH_OFFSET;
+    private static long CONSTANT_POOL_ENTRIES_OFFSET;
+    private static long ARRAY_LENGTH_OFFSET;
+    private static long SHORT_ARRAY_ELEMENTS_OFFSET;
+    private static long ARRAY_ELEMENTS_OFFSET;
+    private static long SYMBOL_LENGTH_OFFSET;
+    private static long SYMBOL_BODY_OFFSET;
+    private static long CLASS_KLASS_OFFSET;
+    private static long KLASS_JAVA_MIRROR_OFFSET;
+    private static long KLASS_SUBKLASS_OFFSET;
+    private static long KLASS_NEXT_SIBLING_OFFSET;
     private static final long VTABLE_LAYOUT_SCAN_BYTES = 2048L;
     private static final long INSTANCE_KLASS_LAYOUT_SCAN_BYTES = 4096L;
     private static final long CONSTANT_POOL_HOLDER_SCAN_BYTES = 64L;
-    private static final int FIELD_ACCESS_FLAGS_OFFSET = 0;
-    private static final int FIELD_NAME_INDEX_OFFSET = 1;
-    private static final int FIELD_SIGNATURE_INDEX_OFFSET = 2;
-    private static final int FIELD_LOW_PACKED_OFFSET = 4;
-    private static final int FIELD_HIGH_PACKED_OFFSET = 5;
-    private static final int FIELD_SLOTS = 6;
+    private static int FIELD_ACCESS_FLAGS_OFFSET;
+    private static int FIELD_NAME_INDEX_OFFSET;
+    private static int FIELD_SIGNATURE_INDEX_OFFSET;
+    private static int FIELD_LOW_PACKED_OFFSET;
+    private static int FIELD_HIGH_PACKED_OFFSET;
+    private static int FIELD_SLOTS;
     private static final int MAX_FIELD_SLOTS = 1_000_000;
     private static final int HOTSPOT_FIELD_MODIFIER_MASK = Modifier.fieldModifiers();
     private static final byte NOP = 0x00;
@@ -1641,7 +1642,35 @@ public class SeraLegitHook {
             }
 
             try {
-                verifyRuntime();
+                JVM jvmLayout = JVM.getInstance();
+                jvmLayout.requireValid();
+                RESOLVED_METHOD_NAME_VMTARGET_OFFSET = jvmLayout.resolvedMethodNameVmtargetOffset;
+                METHOD_CONST_METHOD_OFFSET = jvmLayout.methodConstMethodOffset;
+                METHOD_VTABLE_INDEX_OFFSET = jvmLayout.methodVtableIndexOffset;
+                CONST_METHOD_CONSTANTS_OFFSET = jvmLayout.constMethodConstantsOffset;
+                CONST_METHOD_CODE_SIZE_OFFSET = jvmLayout.constMethodCodeSizeOffset;
+                CONST_METHOD_NAME_INDEX_OFFSET = jvmLayout.constMethodNameIndexOffset;
+                CONST_METHOD_METHOD_IDNUM_OFFSET = jvmLayout.constMethodMethodIdnumOffset;
+                CONST_METHOD_ORIGINAL_METHOD_IDNUM_OFFSET =
+                        jvmLayout.constMethodOriginalMethodIdnumOffset;
+                CONST_METHOD_CODE_OFFSET = jvmLayout.constMethodCodeOffset;
+                CONSTANT_POOL_LENGTH_OFFSET = jvmLayout.constantPoolLengthOffset;
+                CONSTANT_POOL_ENTRIES_OFFSET = jvmLayout.constantPoolEntriesOffset;
+                ARRAY_LENGTH_OFFSET = jvmLayout.metadataArrayLengthOffset;
+                SHORT_ARRAY_ELEMENTS_OFFSET = jvmLayout.metadataU2ArrayElementsOffset;
+                ARRAY_ELEMENTS_OFFSET = jvmLayout.metadataArrayElementsOffset;
+                SYMBOL_LENGTH_OFFSET = jvmLayout.symbolLengthOffset;
+                SYMBOL_BODY_OFFSET = jvmLayout.symbolBodyOffset;
+                CLASS_KLASS_OFFSET = jvmLayout.classKlassOffset;
+                KLASS_JAVA_MIRROR_OFFSET = jvmLayout.klassJavaMirrorOffset;
+                KLASS_SUBKLASS_OFFSET = jvmLayout.klassSubklassOffset;
+                KLASS_NEXT_SIBLING_OFFSET = jvmLayout.klassNextSiblingOffset;
+                FIELD_ACCESS_FLAGS_OFFSET = jvmLayout.fieldAccessFlagsOffset;
+                FIELD_NAME_INDEX_OFFSET = jvmLayout.fieldNameIndexOffset;
+                FIELD_SIGNATURE_INDEX_OFFSET = jvmLayout.fieldSignatureIndexOffset;
+                FIELD_LOW_PACKED_OFFSET = jvmLayout.fieldLowPackedOffset;
+                FIELD_HIGH_PACKED_OFFSET = jvmLayout.fieldHighPackedOffset;
+                FIELD_SLOTS = jvmLayout.fieldSlots;
                 directMethodHandleClass = Class.forName("java.lang.invoke.DirectMethodHandle");
                 constantPoolClass = Class.forName("jdk.internal.reflect.ConstantPool");
                 Class<?> memberName = Class.forName("java.lang.invoke.MemberName");
@@ -1658,27 +1687,95 @@ public class SeraLegitHook {
                         "getUTF8At",
                         MethodType.methodType(String.class, int.class));
 
-                Field directMember = declaredField(directMethodHandleClass, "member");
-                Field resolvedMethod = declaredField(memberName, "method");
-                Field referenceValue = declaredField(ReferenceSlot.class, "value");
-                Field reflectionData = declaredField(Class.class, "reflectionData");
-                directMethodHandleMemberOffset = UnsafeUtility.UNSAFE.objectFieldOffset(directMember);
-                memberNameResolvedMethodOffset = UnsafeUtility.UNSAFE.objectFieldOffset(resolvedMethod);
                 referenceSlot = new ReferenceSlot();
-                referenceSlotValueOffset = UnsafeUtility.UNSAFE.objectFieldOffset(referenceValue);
-                classReflectionDataOffset = UnsafeUtility.UNSAFE.objectFieldOffset(reflectionData);
-                NarrowOopEncoding encoding = deriveNarrowOopEncoding();
-                narrowOopBase = encoding.base;
-                narrowOopShift = encoding.shift;
-                verifyKlassLayout();
-                verifyLayout();
-                verifyVtableLayout();
-                verifyMethodTableLayout();
-                verifyFieldTableLayout();
-                verifyJavaFieldsCountLayout();
+                directMethodHandleMemberOffset = jvmLayout.directMethodHandleMemberOffset;
+                memberNameResolvedMethodOffset = jvmLayout.memberNameResolvedMethodOffset;
+                referenceSlotValueOffset = jvmLayout.referenceSlotValueOffset;
+                narrowOopBase = jvmLayout.narrowOopBase;
+                narrowOopShift = jvmLayout.narrowOopShift;
+                vtableStartOffset = jvmLayout.vtableStartOffset;
+                methodsOffset = jvmLayout.methodsOffset;
+                fieldsOffset = jvmLayout.fieldsOffset;
+                javaFieldsCountOffset = jvmLayout.javaFieldsCountOffset;
+                classReflectionDataOffset = jvmLayout.classReflectionDataOffset;
+                metadataAddressPrefix = jvmLayout.metadataAddressPrefix;
+                verifyRuntime();
+                verifySnapshot(jvmLayout);
                 initialized = true;
             } catch (Exception e) {
                 throw new IllegalStateException("JDK 17 HotSpot Unsafe hook is unavailable", e);
+            }
+        }
+    }
+
+    /**
+     * Performs only consistency checks on the native snapshot.  The native
+     * probe is the single source of layout values; this method must not scan
+     * HotSpot metadata again or replace any value discovered by Rust.
+     */
+    private static void verifySnapshot(JVM layout) {
+        if (layout.addressSize != Long.BYTES) {
+            throw new IllegalStateException(
+                    "The JVM layout snapshot requires a 64-bit address size");
+        }
+        if (layout.metadataArrayLengthOffset != layout.arrayLengthOffset
+                || layout.metadataArrayElementsOffset != layout.arrayElementsOffset) {
+            throw new IllegalStateException("Inconsistent metadata array aliases in JVM snapshot");
+        }
+        if (layout.fieldSlots <= 0 || layout.fieldSlots > MAX_FIELD_SLOTS) {
+            throw new IllegalStateException("Invalid field slot count in JVM snapshot");
+        }
+
+        long[] offsets = {
+                layout.resolvedMethodNameVmtargetOffset,
+                layout.methodConstMethodOffset,
+                layout.methodVtableIndexOffset,
+                layout.constMethodConstantsOffset,
+                layout.constMethodCodeSizeOffset,
+                layout.constMethodNameIndexOffset,
+                layout.constMethodMethodIdnumOffset,
+                layout.constMethodOriginalMethodIdnumOffset,
+                layout.constMethodCodeOffset,
+                layout.constantPoolLengthOffset,
+                layout.constantPoolEntriesOffset,
+                layout.metadataArrayLengthOffset,
+                layout.metadataArrayElementsOffset,
+                layout.metadataU2ArrayElementsOffset,
+                layout.javaArrayLengthOffset,
+                layout.javaArrayElementsOffset,
+                layout.shortArrayElementsOffset,
+                layout.symbolLengthOffset,
+                layout.symbolBodyOffset,
+                layout.classKlassOffset,
+                layout.objectKlassOffset,
+                layout.klassJavaMirrorOffset,
+                layout.klassSubklassOffset,
+                layout.klassNextSiblingOffset,
+                layout.directMethodHandleMemberOffset,
+                layout.memberNameResolvedMethodOffset,
+                layout.referenceSlotValueOffset,
+                layout.vtableStartOffset,
+                layout.methodsOffset,
+                layout.fieldsOffset,
+                layout.javaFieldsCountOffset,
+                layout.classReflectionDataOffset
+        };
+        for (long offset : offsets) {
+            if (offset < 0L) {
+                throw new IllegalStateException("Negative offset in JVM layout snapshot");
+            }
+        }
+
+        int[] fieldOffsets = {
+                layout.fieldAccessFlagsOffset,
+                layout.fieldNameIndexOffset,
+                layout.fieldSignatureIndexOffset,
+                layout.fieldLowPackedOffset,
+                layout.fieldHighPackedOffset
+        };
+        for (int offset : fieldOffsets) {
+            if (offset < 0) {
+                throw new IllegalStateException("Negative field offset in JVM layout snapshot");
             }
         }
     }

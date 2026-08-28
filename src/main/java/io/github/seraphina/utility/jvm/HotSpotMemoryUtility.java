@@ -205,9 +205,6 @@ public final class HotSpotMemoryUtility {
         }
     }
 
-
-
-
     private static HotSpotMemoryLayout memoryLayout() {
         HotSpotMemoryLayout current = memoryLayout;
         if (current != null) {
@@ -240,7 +237,7 @@ public final class HotSpotMemoryUtility {
         private final int narrowKlassShift;
 
         private HotSpotMemoryLayout() {
-            jvmLayout = JVM.INSTANCE;
+            jvmLayout = JVM.getInstance();
             jvmLayout.requireValid();
             verifyJdk17HotSpot();
 
@@ -265,6 +262,15 @@ public final class HotSpotMemoryUtility {
             if (unsafe.addressSize() != Long.BYTES) {
                 throw new IllegalStateException("HotSpotMemoryUtility memory walkers require a 64-bit JVM");
             }
+        }
+
+        private long klassPointer(Class<?> klass) {
+            long pointer = unsafe.getLong(klass, jvmLayout.classKlassOffset);
+            if (!isPlausibleMetadataPointer(pointer)) {
+                throw new IllegalStateException(
+                        "Invalid java.lang.Class Klass pointer for " + klass);
+            }
+            return pointer;
         }
 
         private long klassPointerAt(long objectAddress) {

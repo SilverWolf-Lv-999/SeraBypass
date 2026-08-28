@@ -11,7 +11,22 @@ import io.github.seraphina.jnct.JNCT;
  * values that are valid for that VM instance.</p>
  */
 public final class JVM {
-    public static final JVM INSTANCE = (JVM) JNCT.ivk("createJVM");
+    public static JVM getInstance() {
+        return Holder.INSTANCE;
+    }
+
+    private static JVM initialize() {
+        JVM instance = new JVM();
+        Object result = JNCT.ivk("createJVM", instance);
+        if (result != instance) {
+            throw new IllegalStateException("The native JVM layout probe returned a different instance");
+        }
+        return instance;
+    }
+
+    private static final class Holder {
+        private static final JVM INSTANCE = initialize();
+    }
 
     public final long resolvedMethodNameVmtargetOffset;
     public final long methodConstMethodOffset;
@@ -31,6 +46,8 @@ public final class JVM {
     public final long metadataArrayLengthOffset;
     /** The first element of a native HotSpot Array&lt;T&gt;. */
     public final long metadataArrayElementsOffset;
+    /** The first u2 element of the native HotSpot Array&lt;u2&gt; used by InstanceKlass fields. */
+    public final long metadataU2ArrayElementsOffset;
 
     /** The length field of a Java array object. */
     public final long javaArrayLengthOffset;
@@ -86,7 +103,7 @@ public final class JVM {
 
     /**
      * The native worker uses AllocObject, rather than invoking this constructor,
-     * so that JVM.INSTANCE can be created while this class's static initializer
+     * so that the snapshot can be created while this class's static initializer
      * is waiting for JNCT.  The assignments also make the Java-side snapshot
      * well-defined if the class is ever instantiated by a debugger or agent.
      */
@@ -104,6 +121,7 @@ public final class JVM {
         constantPoolEntriesOffset = 0L;
         metadataArrayLengthOffset = 0L;
         metadataArrayElementsOffset = 0L;
+        metadataU2ArrayElementsOffset = 0L;
         javaArrayLengthOffset = 0L;
         javaArrayElementsOffset = 0L;
         shortArrayElementsOffset = 0L;
@@ -186,7 +204,37 @@ public final class JVM {
     private static final class KlassLayoutSibling extends KlassLayoutParent {
     }
 
-    private static final class VtableLayoutProbe {
+    private static class KlassSubklassRootOne {
+    }
+
+    private static final class KlassSubklassChildOne extends KlassSubklassRootOne {
+    }
+
+    private static class KlassSubklassRootTwo {
+    }
+
+    private static final class KlassSubklassChildTwo extends KlassSubklassRootTwo {
+    }
+
+    private static class KlassSiblingRootOne {
+    }
+
+    private static final class KlassSiblingChildOne extends KlassSiblingRootOne {
+    }
+
+    private static final class KlassSiblingChildTwo extends KlassSiblingRootOne {
+    }
+
+    private static class KlassSiblingRootTwo {
+    }
+
+    private static final class KlassSiblingChildThree extends KlassSiblingRootTwo {
+    }
+
+    private static final class KlassSiblingChildFour extends KlassSiblingRootTwo {
+    }
+
+    private static class VtableLayoutProbe {
         int first() {
             return 1;
         }
@@ -235,9 +283,57 @@ public final class JVM {
     }
 
     private static final class NativeProbe {
-        private static java.lang.invoke.MethodHandle direct(java.lang.reflect.Method method)
-                throws IllegalAccessException {
-            return io.github.seraphina.utility.UnsafeUtility.TRUSTED_LOOKUP.unreflect(method);
+        private static final java.lang.invoke.VarHandle METHOD_SLOT = methodSlotHandle();
+        private static final java.lang.invoke.MethodHandle INTERNAL_MEMBER_NAME =
+                internalMemberNameHandle();
+        private static final java.lang.invoke.VarHandle MEMBER_NAME_METHOD =
+                memberNameMethodHandle();
+
+        private static Object resolvedMethod(java.lang.reflect.Method method) throws Throwable {
+            java.lang.invoke.MethodHandle direct =
+                    io.github.seraphina.utility.UnsafeUtility.TRUSTED_LOOKUP.unreflect(method);
+            Object memberName = INTERNAL_MEMBER_NAME.invoke(direct);
+            return MEMBER_NAME_METHOD.get(memberName);
+        }
+
+        private static int methodSlot(java.lang.reflect.Method method) {
+            return (int) METHOD_SLOT.get(method);
+        }
+
+        private static java.lang.invoke.VarHandle methodSlotHandle() {
+            try {
+                return io.github.seraphina.utility.UnsafeUtility.TRUSTED_LOOKUP.findVarHandle(
+                        java.lang.reflect.Method.class, "slot", int.class);
+            } catch (ReflectiveOperationException exception) {
+                throw new IllegalStateException(
+                        "Could not resolve java.lang.reflect.Method.slot", exception);
+            }
+        }
+
+        private static java.lang.invoke.MethodHandle internalMemberNameHandle() {
+            try {
+                java.lang.reflect.Method method =
+                        java.lang.invoke.MethodHandle.class.getDeclaredMethod("internalMemberName");
+                return io.github.seraphina.utility.UnsafeUtility.TRUSTED_LOOKUP
+                        .unreflect(method)
+                        .asType(java.lang.invoke.MethodType.methodType(
+                                Object.class, java.lang.invoke.MethodHandle.class));
+            } catch (ReflectiveOperationException exception) {
+                throw new IllegalStateException(
+                        "Could not resolve MethodHandle.internalMemberName", exception);
+            }
+        }
+
+        private static java.lang.invoke.VarHandle memberNameMethodHandle() {
+            try {
+                Class<?> memberNameClass = Class.forName("java.lang.invoke.MemberName");
+                java.lang.reflect.Field field = memberNameClass.getDeclaredField("method");
+                return io.github.seraphina.utility.UnsafeUtility.TRUSTED_LOOKUP.findVarHandle(
+                        memberNameClass, "method", field.getType());
+            } catch (ReflectiveOperationException exception) {
+                throw new IllegalStateException(
+                        "Could not resolve MemberName.method", exception);
+            }
         }
     }
 }

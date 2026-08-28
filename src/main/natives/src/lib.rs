@@ -191,7 +191,7 @@ unsafe fn dispatch_jnct_command(
     ((*(*environment)).v1_1.ReleaseStringUTFChars)(environment, command, command_characters);
 
     if is_create_jvm {
-        return jvm::create_instance(environment);
+        return jvm::create_instance(environment, _arguments);
     }
 
     if is_hello {
