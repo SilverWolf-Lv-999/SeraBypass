@@ -5,6 +5,7 @@ use core::ptr;
 use crate::log;
 use jni_sys::{JNIEnv, jclass, jint, jlong, jmethodID, jobject, jshort, jvalue};
 
+const JVM_CLASS_NAME: &[u8] = b"io/github/seraphina/jnct/api/JVM\0";
 const OBJECT_CLASS_NAME: &[u8] = b"java/lang/Object\0";
 const STRING_CLASS_NAME: &[u8] = b"java/lang/String\0";
 const CLASS_CLASS_NAME: &[u8] = b"java/lang/Class\0";
@@ -287,7 +288,7 @@ pub unsafe fn create_instance(environment: *mut JNIEnv, arguments: jobject) -> j
         clear_pending_exception(environment);
         return ptr::null_mut();
     }
-    let class: jclass = ((*(*environment)).v1_1.GetObjectClass)(environment, instance).cast();
+    let class = find_class(environment, JVM_CLASS_NAME);
     if class.is_null() {
         clear_pending_exception(environment);
         delete_local_reference(environment, instance);
@@ -524,7 +525,6 @@ unsafe fn probe(
     )? as i64;
 
     log::info("createJVM: array layout resolved");
-    log::info("createJVM: begin method layout");
     let method_layout = locate_method_layout(environment, jvm_class)?;
     snapshot.resolved_method_name_vmtarget_offset =
         method_layout.resolved_method_vmtarget_offset as i64;
@@ -542,7 +542,13 @@ unsafe fn probe(
     snapshot.vtable_start_offset =
         locate_vtable_start(environment, snapshot, class_klass_offset)? as i64;
     snapshot.metadata_address_prefix = (method_layout.first_method >> 32) as i64;
-    let pool_layout = locate_constant_pool_layout(environment, jvm_class, &method_layout.probes)?;
+    let constant_pool_class = find_class(environment, JVM_CLASS_NAME);
+    if constant_pool_class.is_null() {
+        clear_pending_exception(environment);
+        return Err(b"Could not resolve the JVM constant-pool probe class\0");
+    }
+    let pool_layout =
+        locate_constant_pool_layout(environment, constant_pool_class, &method_layout.probes)?;
     snapshot.const_method_constants_offset = pool_layout.0 as i64;
     snapshot.constant_pool_length_offset = pool_layout.1 as i64;
     snapshot.constant_pool_entries_offset = pool_layout.2 as i64;
@@ -576,8 +582,10 @@ unsafe fn probe(
     snapshot.field_high_packed_offset = field_layout.high_packed_offset as i32;
     snapshot.field_slots = field_layout.slots as i32;
     log::info("createJVM: fields table resolved");
-    snapshot.java_fields_count_offset =
-        locate_java_fields_count_offset(environment, class_klass_offset)? as i64;
+    let java_fields_count_offset =
+        locate_java_fields_count_offset(environment, class_klass_offset)?;
+    snapshot.java_fields_count_offset = java_fields_count_offset as i64;
+    log::info("createJVM: field count resolved");
     let _ = (
         reference_slot,
         object_instance,
@@ -2084,35 +2092,11 @@ unsafe fn locate_fields_layout(
         delete_local_reference(environment, reflected);
         delete_local_reference(environment, unsafe_class_object.cast());
     }
-    log::info(format_args!(
-        "createJVM: field expectations s=({:#x},{},{},{}) l=({:#x},{},{},{}) o=({:#x},{},{},{})",
-        expectations[0].offset,
-        expectations[0].access_flags,
-        expectations[0].name_index,
-        expectations[0].signature_index,
-        expectations[1].offset,
-        expectations[1].access_flags,
-        expectations[1].name_index,
-        expectations[1].signature_index,
-        expectations[2].offset,
-        expectations[2].access_flags,
-        expectations[2].name_index,
-        expectations[2].signature_index
-    ));
     let klass = class_klass_pointer(class, class_klass_offset);
     for klass_offset in (0..MAX_KLASS_SCAN_BYTES).step_by(8) {
         let array = read_pointer(klass + klass_offset).unwrap_or(0);
         if !plausible_pointer(array) {
             continue;
-        }
-        let raw_length = read_u32(array + metadata_length_offset);
-        if raw_length.is_some_and(|length| length > 0 && length <= 96 && length % 3 == 0) {
-            let sample: [Option<u16>; 18] =
-                core::array::from_fn(|index| read_u16(array + 4 + index * 2));
-            log::info(format_args!(
-                "createJVM: field candidate klass+{} array={:#x} length={:?} sample={:?}",
-                klass_offset, array, raw_length, sample
-            ));
         }
         if let Some(layout) = match_field_table(array, metadata_length_offset, &expectations) {
             delete_local_reference(environment, class.cast());
@@ -2297,12 +2281,6 @@ unsafe fn match_field_table(
                     expectations,
                     FieldColumn::PackedLow,
                 );
-                if metadata_elements_offset == 4 && slots == 6 && name_offset == 1 {
-                    log::info(format_args!(
-                        "createJVM: field matcher candidates sig={:?} access={:?} low={:?} rows={:?}",
-                        signature_candidate, access_candidate, low_candidate, row_expectation
-                    ));
-                }
                 let (Some(signature_offset), Some(access_offset), Some(low_offset)) =
                     (signature_candidate, access_candidate, low_candidate)
                 else {
@@ -2327,12 +2305,6 @@ unsafe fn match_field_table(
                             FieldColumn::PackedHigh,
                         )
                     });
-                if metadata_elements_offset == 4 && slots == 6 && name_offset == 1 {
-                    log::info(format_args!(
-                        "createJVM: field matcher high={} high_matches={}",
-                        high_offset, high_matches
-                    ));
-                }
                 if !high_matches {
                     continue;
                 }
@@ -2364,16 +2336,8 @@ unsafe fn match_field_table(
                     slots,
                 );
                 if candidate.is_some() {
-                    log::info(format_args!(
-                        "createJVM: field matcher ambiguous array={:#x} offset={} slots={}",
-                        array, metadata_elements_offset, slots
-                    ));
                     return None;
                 }
-                log::info(format_args!(
-                    "createJVM: field matcher layout array={:#x} offset={} slots={} columns={:?}",
-                    array, metadata_elements_offset, slots, offsets
-                ));
                 candidate = Some(layout);
             }
         }
@@ -2461,10 +2425,6 @@ unsafe fn locate_java_fields_count_offset(
         find_class(environment, FIELD_COUNT_EXTENDED_CLASS_NAME),
         find_class(environment, FIELD_COUNT_STATIC_CLASS_NAME),
     ];
-    log::info(format_args!(
-        "createJVM: field count probe classes={:?},{:?},{:?}",
-        classes[0], classes[1], classes[2]
-    ));
     if classes.iter().any(|class| class.is_null()) {
         clear_pending_exception(environment);
         return Err(b"Could not resolve field count probes\0");
@@ -2474,14 +2434,8 @@ unsafe fn locate_java_fields_count_offset(
         class_klass_pointer(classes[1], class_klass_offset),
         class_klass_pointer(classes[2], class_klass_offset),
     ];
-    log::info(format_args!(
-        "createJVM: field count probe klasses={:#x},{:#x},{:#x}",
-        klasses[0], klasses[1], klasses[2]
-    ));
-    if klasses
-        .iter()
-        .any(|klass| !plausible_pointer(*klass) || !is_readable(*klass, size_of::<u16>()))
-    {
+    let klasses_are_plausible = klasses.iter().all(|klass| plausible_pointer(*klass));
+    if !klasses_are_plausible {
         return Err(b"Could not resolve field count probe Klass pointers\0");
     }
     // _java_fields_count is an InstanceKlass-local field.  Keep this

@@ -8,8 +8,12 @@ import io.github.seraphina.reflect.LambdaManager;
 import io.github.seraphina.test.TestObj;
 import io.github.seraphina.utility.SysUtility;
 import io.github.seraphina.test.TransTarget;
+import io.github.seraphina.utility.hook.SeraLegitHook;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 public class Start {
 
@@ -36,7 +40,21 @@ public class Start {
         Agent.start(args);
         TransTarget.class.getName();
         Agent.transform(TransTarget.class);
-        Runtime.getRuntime().addShutdownHook(new Thread(LambdaManager::clearCache));
+        System.out.println(a());
+        SeraLegitHook.hookMethod(Start.class, "a", 0);
+        System.out.println(a());
+        new Thread(() -> {
+            for (Method m : TransTarget.class.getDeclaredMethods()) {
+                LOGGER.info(m.getName());
+            }
+            for (Field m : TransTarget.class.getDeclaredFields()) {
+                LOGGER.info(m.getName());
+            }
+        }).start();
+        Runtime.getRuntime().addShutdownHook(new Thread(()-> {
+            LOGGER.info("stop");
+            LambdaManager.clearCache();
+        }));
     }
 
     public static int a() {

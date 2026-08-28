@@ -21,6 +21,7 @@ public final class JVM {
         if (result != instance) {
             throw new IllegalStateException("The native JVM layout probe returned a different instance");
         }
+        instance.requireValid();
         return instance;
     }
 
