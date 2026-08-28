@@ -24,13 +24,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-/**
- * Creates lambda-backed accessors for fields and methods.
- *
- * <p>Reflection is used only while resolving and creating an accessor. The
- * returned object invokes a generated lambda on every subsequent call.</p>
- */
-@SuppressWarnings("removal")
 public final class LambdaManager {
     private static final Unsafe UNSAFE = UnsafeUtility.UNSAFE;
     private static final MethodHandles.Lookup LAMBDA_LOOKUP = MethodHandles.lookup();
@@ -47,17 +40,11 @@ public final class LambdaManager {
             new ConcurrentHashMap<>();
     private static final ConcurrentMap<FieldFactoryKey, FieldFactory> FIELD_FACTORIES =
             new ConcurrentHashMap<>();
-
-
-    /** Returns an accessor for a static field. */
+    
     public static <T> LambdaField<T> getField(Class<?> clazz, String fieldName) {
         return getField(clazz, fieldName, null);
     }
 
-    /**
-     * Returns an accessor for a field on {@code instance}. Static fields ignore
-     * {@code instance} and use one shared cached accessor.
-     */
     @SuppressWarnings("unchecked")
     public static <T> LambdaField<T> getField(
             Class<?> clazz, String fieldName, Object instance) {
@@ -73,16 +60,13 @@ public final class LambdaManager {
         if (!isStatic && !field.getDeclaringClass().isInstance(instance)) {
             throw new IllegalArgumentException(
                     "Instance type " + instance.getClass().getName()
+                            + " is not compatible with field " + field);
         }
         Object target = isStatic ? null : instance;
         return (LambdaField<T>) FIELD_CACHE.computeIfAbsent(
                 new FieldKey(field, target), ignored -> createField(field, target));
     }
 
-    /**
-     * Returns a no-argument lambda accessor for one method invocation. The
-     * receiver and arguments are captured when this method returns.
-     */
     @SuppressWarnings("unchecked")
     public static <T> LambdaMethod<T> getMethod(
             Class<?> clazz, String methodName, Object instance, Object... arguments) {
@@ -97,6 +81,11 @@ public final class LambdaManager {
             throw new IllegalArgumentException(
                     "An instance is required for non-static method " + method);
         }
+        if (!isStatic && !method.getDeclaringClass().isInstance(instance)) {
+            throw new IllegalArgumentException(
+                    "Instance type " + instance.getClass().getName()
+                            + " is not compatible with method " + method);
+        }
         Object target = isStatic ? null : instance;
         Object[] capturedArguments = selection.arguments();
         MethodKey key = new MethodKey(method, target, selection.keyArguments());
@@ -104,7 +93,6 @@ public final class LambdaManager {
                 key, ignored -> createMethod(method, target, capturedArguments));
     }
 
-    /** Drops generated accessors and their reusable lambda factories. */
     public static void clearCache() {
         FIELD_CACHE.clear();
         METHOD_CACHE.clear();
@@ -113,7 +101,7 @@ public final class LambdaManager {
     }
 
     static RuntimeException rethrow(Throwable throwable) {
-        LambdaManager.<RuntimeException>throwUnchecked(throwable);
+        LambdaManager.throwUnchecked(throwable);
         return null;
     }
 
@@ -876,12 +864,3 @@ public final class LambdaManager {
         return depth;
     }
 }
-
-
-
-
-
-
-
-
-

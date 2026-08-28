@@ -4,6 +4,7 @@ import com.sun.jna.Native;
 import io.github.seraphina.agent.Agent;
 import io.github.seraphina.agent.impl.TestSeraTrans;
 import io.github.seraphina.jnct.JNCT;
+import io.github.seraphina.reflect.LambdaManager;
 import io.github.seraphina.test.TestObj;
 import io.github.seraphina.utility.SysUtility;
 import io.github.seraphina.test.TransTarget;
@@ -26,6 +27,7 @@ public class Start {
         Agent.start(args);
         TransTarget.class.getName();
         Agent.transform(TransTarget.class);
+        Runtime.getRuntime().addShutdownHook(new Thread(LambdaManager::clearCache));
     }
 
     public static int a() {
