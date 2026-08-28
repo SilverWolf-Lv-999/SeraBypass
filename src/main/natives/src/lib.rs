@@ -5,6 +5,7 @@
 #[cfg(test)]
 extern crate alloc;
 
+mod jvm;
 mod klass;
 pub mod log;
 mod peer_jvmti;
@@ -38,6 +39,7 @@ const JNCT_RESULT_FIELD_DESCRIPTOR: &[u8] = b"Ljava/lang/Object;\0";
 const HELLO_COMMAND: &[u8] = b"hello";
 const DEFINE_HIDDEN_CLASS_COMMAND: &[u8] = b"defineHiddenClass";
 const PEER_JVMTI_COMMAND: &[u8] = b"peerJvmTI";
+const CREATE_JVM_COMMAND: &[u8] = b"createJVM";
 const HELLO_RESULT: &[u8] = b"Hello\0";
 const UNKNOWN_COMMAND_RESULT: &[u8] = b"Unknown JNCT command\0";
 const PEER_JVMTI_INITIALIZED_RESULT: &[u8] = b"peerJvmTI initialized\0";
@@ -185,7 +187,12 @@ unsafe fn dispatch_jnct_command(
     let is_hello = command_bytes == HELLO_COMMAND;
     let is_define_hidden_class = command_bytes == DEFINE_HIDDEN_CLASS_COMMAND;
     let is_peer_jvmti = command_bytes == PEER_JVMTI_COMMAND;
+    let is_create_jvm = command_bytes == CREATE_JVM_COMMAND;
     ((*(*environment)).v1_1.ReleaseStringUTFChars)(environment, command, command_characters);
+
+    if is_create_jvm {
+        return jvm::create_instance(environment);
+    }
 
     if is_hello {
         printf!("Hello");
