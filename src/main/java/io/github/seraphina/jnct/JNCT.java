@@ -12,7 +12,7 @@ public class JNCT {
         args = arg;
         while (result == null) {
             try {
-                Thread.yield();
+                Thread.onSpinWait();
             } catch (Exception ignore) {
 
             }
@@ -22,17 +22,5 @@ public class JNCT {
         Object tmp = result;
         result = null;
         return tmp;
-    }
-
-    public static synchronized void autoIvk(String command) {
-        cmd = command;
-        while (result == null) {
-            try {
-                Thread.yield();
-            } catch (Exception ignore) {}
-        }
-        cmd = null;
-        args = null;
-        result = null;
     }
 }

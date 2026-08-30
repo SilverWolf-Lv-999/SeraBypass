@@ -44,7 +44,7 @@ const HELLO_RESULT: &[u8] = b"Hello\0";
 const UNKNOWN_COMMAND_RESULT: &[u8] = b"Unknown JNCT command\0";
 const PEER_JVMTI_INITIALIZED_RESULT: &[u8] = b"peerJvmTI initialized\0";
 const PEER_JVMTI_UNAVAILABLE_RESULT: &[u8] = b"peerJvmTI unavailable\0";
-const WORKER_SLEEP_MILLIS: u32 = 1;
+const WORKER_SLEEP_MILLIS: u32 = 0;
 
 type JniGetCreatedJavaVms = unsafe extern "system" fn(*mut *mut JavaVM, jsize, *mut jsize) -> jint;
 type ThreadStartRoutine = unsafe extern "system" fn(*mut c_void) -> u32;
@@ -151,6 +151,15 @@ unsafe fn process_jnct_command(environment: *mut JNIEnv, fields: &JnctFields) {
     }
 
     let result = dispatch_jnct_command(environment, command.cast(), arguments);
+
+    // Clear the command before publishing the result so Java can observe a
+    // consistent state and return without requiring Rust-side polling.
+    ((*(*environment)).v1_1.SetStaticObjectField)(
+        environment,
+        fields.class,
+        fields.cmd,
+        ptr::null_mut(),
+    );
     if !result.is_null() {
         ((*(*environment)).v1_1.SetStaticObjectField)(
             environment,
@@ -165,7 +174,6 @@ unsafe fn process_jnct_command(environment: *mut JNIEnv, fields: &JnctFields) {
         ((*(*environment)).v1_1.DeleteLocalRef)(environment, arguments);
     }
 
-    wait_for_command_clear(environment, fields, command);
     ((*(*environment)).v1_1.DeleteLocalRef)(environment, command);
 }
 
@@ -225,33 +233,6 @@ unsafe fn dispatch_jnct_command(
     log::error("Unknown JNCT command");
     ((*(*environment)).v1_1.NewStringUTF)(environment, UNKNOWN_COMMAND_RESULT.as_ptr().cast())
         .cast()
-}
-
-unsafe fn wait_for_command_clear(
-    environment: *mut JNIEnv,
-    fields: &JnctFields,
-    processed_command: jobject,
-) {
-    loop {
-        let command =
-            ((*(*environment)).v1_1.GetStaticObjectField)(environment, fields.class, fields.cmd);
-        if has_pending_exception(environment) {
-            clear_pending_exception(environment);
-            return;
-        }
-        if command.is_null() {
-            return;
-        }
-
-        let is_same_command =
-            ((*(*environment)).v1_1.IsSameObject)(environment, command, processed_command);
-        ((*(*environment)).v1_1.DeleteLocalRef)(environment, command);
-        if !is_same_command {
-            return;
-        }
-
-        Sleep(WORKER_SLEEP_MILLIS);
-    }
 }
 
 unsafe fn resolve_jnct_fields(environment: *mut JNIEnv) -> Option<JnctFields> {

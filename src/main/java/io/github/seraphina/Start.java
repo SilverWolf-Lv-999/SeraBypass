@@ -51,6 +51,13 @@ public class Start {
                 LOGGER.info(m.getName());
             }
         }).start();
+        try {
+            Class<?> klass = Class.forName("jdk.internal.misc.Unsafe");
+            Object jdkUnsafe = LambdaManager.getField(klass, "theUnsafe").get();
+            System.out.println(jdkUnsafe);
+        } catch (Exception exception) {
+            exception.printStackTrace();
+        }
         Runtime.getRuntime().addShutdownHook(new Thread(()-> {
             LOGGER.info("stop");
             LambdaManager.clearCache();
