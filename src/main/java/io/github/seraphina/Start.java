@@ -3,6 +3,7 @@ package io.github.seraphina;
 import com.sun.jna.Native;
 import io.github.seraphina.agent.Agent;
 import io.github.seraphina.agent.impl.TestSeraTrans;
+import io.github.seraphina.agent.impl.TransSystem;
 import io.github.seraphina.jnct.JNCT;
 import io.github.seraphina.reflect.LambdaManager;
 import io.github.seraphina.test.TestObj;
@@ -35,10 +36,17 @@ public class Start {
         JNCT.ivk("peerJvmTI");
         LOGGER.info("sera_bypass.dll JNI smoke test completed");
         Native.main(args);
-        Agent.reg(new TestSeraTrans());
+        {
+            Agent.reg(new TestSeraTrans());
+            Agent.reg(new TransSystem());
+        }
         Agent.start(args);
         TransTarget.class.getName();
-        Agent.transform(TransTarget.class);
+        {
+            Agent.transform(TransTarget.class);
+            Agent.transform(System.class);
+            Agent.transform(Object.class);
+        }
         System.out.println(a());
         SeraLegitHook.hookMethod(Start.class, "a", 0);
         System.out.println(a());
@@ -57,6 +65,7 @@ public class Start {
         } catch (Exception exception) {
             exception.printStackTrace();
         }
+        Object.class.getClass();
         Runtime.getRuntime().addShutdownHook(new Thread(()-> {
             LOGGER.info("stop");
             LambdaManager.clearCache();

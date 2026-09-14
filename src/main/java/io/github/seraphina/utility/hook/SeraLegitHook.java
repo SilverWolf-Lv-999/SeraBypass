@@ -299,16 +299,14 @@ public class SeraLegitHook {
                                 + " on " + klass.getName(), exception);
             }
 
-            if (!Modifier.isStatic(targetMethod.getModifiers())
-                    || Modifier.isAbstract(targetMethod.getModifiers())
-                    || Modifier.isNative(targetMethod.getModifiers())) {
+            if (Modifier.isAbstract(targetMethod.getModifiers())) {
                 throw new IllegalArgumentException(
-                        "Only concrete static methods can be removed safely: " + targetMethod);
+                        "Only concrete methods can be removed: " + targetMethod);
             }
 
             MethodLocation targetLocation;
             try {
-                targetLocation = locate(targetMethod);
+                targetLocation = locateMethod(targetMethod);
             } catch (IllegalAccessException exception) {
                 throw new IllegalStateException(
                         "Could not locate bytecode metadata for " + targetMethod, exception);
@@ -2127,6 +2125,14 @@ public class SeraLegitHook {
     }
 
     private static MethodLocation locate(Executable executable) throws IllegalAccessException {
+        MethodLocation location = locateMethod(executable);
+        if (location.codeSize == 0) {
+            throw new IllegalArgumentException(executable + " has no Java bytecode");
+        }
+        return location;
+    }
+
+    private static MethodLocation locateMethod(Executable executable) throws IllegalAccessException {
         MethodHandle methodHandle;
         if (executable instanceof Method method) {
             methodHandle = UnsafeUtility.TRUSTED_LOOKUP.unreflect(method);
@@ -2163,9 +2169,6 @@ public class SeraLegitHook {
 
         int codeSize = UnsafeUtility.UNSAFE.getShort(constMethod + CONST_METHOD_CODE_SIZE_OFFSET)
                 & 0xFFFF;
-        if (codeSize == 0) {
-            throw new IllegalArgumentException(executable + " has no Java bytecode");
-        }
 
         return new MethodLocation(
                 methodPointer,
