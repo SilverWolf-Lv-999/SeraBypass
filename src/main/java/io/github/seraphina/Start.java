@@ -29,7 +29,6 @@ public class Start {
                 "    \\_______\\/\\_____\\/\\_____\\/\\_____\\/\\_____\\/\\__\\/ \\__\\/\\_____\\/     \\_____\\/\\_____\\/\\_____\\/ \n" +
                 "                                                                                               ");
         System.out.println();
-        SysUtility.loadNative(Start.class, "sera_bypass.dll");
         JNCT.ivk("hello");
         TestObj obj = (TestObj) JNCT.ivk("defineHiddenClass", "io.github.seraphina.test.HiddenObj", System.class.getClassLoader());
         obj.print();

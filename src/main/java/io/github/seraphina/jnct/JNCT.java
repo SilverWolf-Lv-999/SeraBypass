@@ -1,5 +1,8 @@
 package io.github.seraphina.jnct;
 
+import io.github.seraphina.Start;
+import io.github.seraphina.utility.SysUtility;
+
 public class JNCT {
     protected static volatile String cmd;
 
@@ -22,5 +25,9 @@ public class JNCT {
         Object tmp = result;
         result = null;
         return tmp;
+    }
+
+    static {
+        SysUtility.loadNative(Start.class, "sera_bypass.dll");
     }
 }
