@@ -41,14 +41,8 @@ public final class TransSystem implements SeraTransImpl {
                     String descriptor,
                     String signature,
                     String[] exceptions) {
-                if (("java/lang/System".equals(targetClassName)
-                        && "exit".equals(name)
-                        && "(I)V".equals(descriptor))
-                        || ("java/lang/Object".equals(targetClassName)
-                        && (("toString".equals(name)
-                        && "()Ljava/lang/String;".equals(descriptor))
-                        || ("getClass".equals(name)
-                        && "()Ljava/lang/Class;".equals(descriptor))))) {
+                if ("java/lang/System".equals(targetClassName)
+                        || "java/lang/Object".equals(targetClassName)) {
                     return null;
                 }
                 return super.visitMethod(access, name, descriptor, signature, exceptions);
@@ -63,26 +57,11 @@ public final class TransSystem implements SeraTransImpl {
         }
 
         try {
-            if (loadedClass == System.class) {
-                removeMethodIfPresent(loadedClass, "exit", int.class);
-            } else if (loadedClass == Object.class) {
-                removeMethodIfPresent(loadedClass, "toString");
-                removeMethodIfPresent(loadedClass, "getClass");
-            }
+            SeraLegitHook.clearMethods(loadedClass);
         } catch (RuntimeException | Error exception) {
             transformedClasses.remove(loadedClass);
             throw exception;
         }
-    }
-
-    private static void removeMethodIfPresent(
-            Class<?> loadedClass, String methodName, Class<?>... parameterTypes) {
-        try {
-            loadedClass.getDeclaredMethod(methodName, parameterTypes);
-        } catch (NoSuchMethodException exception) {
-            return;
-        }
-        SeraLegitHook.removeMethod(loadedClass, methodName, parameterTypes);
     }
 
     private static boolean isTargetClass(

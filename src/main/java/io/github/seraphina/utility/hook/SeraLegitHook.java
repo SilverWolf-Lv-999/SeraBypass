@@ -341,6 +341,41 @@ public class SeraLegitHook {
         }
     }
 
+    public static void clearMethods(Class<?> klass) {
+        Objects.requireNonNull(klass, "klass");
+
+        synchronized (SeraLegitHook.class) {
+            initialize();
+
+            long klassAddress = klassPointer(klass);
+            long originalMethodsAddress = UnsafeUtility.UNSAFE.getLong(
+                    klassAddress + methodsOffset);
+            long replacementMethodsAddress = UnsafeUtility.UNSAFE.allocateMemory(
+                    ARRAY_ELEMENTS_OFFSET);
+            UnsafeUtility.UNSAFE.setMemory(
+                    replacementMethodsAddress, ARRAY_ELEMENTS_OFFSET, (byte) 0);
+            UnsafeUtility.UNSAFE.putInt(
+                    replacementMethodsAddress + ARRAY_LENGTH_OFFSET, 0);
+            UnsafeUtility.UNSAFE.putLongVolatile(
+                    null, klassAddress + methodsOffset, replacementMethodsAddress);
+
+            try {
+                clearReflectionData(klass);
+                if (klass.getDeclaredMethods().length != 0
+                        || klass.getDeclaredConstructors().length != 0) {
+                    throw new IllegalStateException(
+                            "HotSpot still exposes methods on " + klass.getName());
+                }
+            } catch (RuntimeException | Error exception) {
+                UnsafeUtility.UNSAFE.putLongVolatile(
+                        null, klassAddress + methodsOffset, originalMethodsAddress);
+                clearReflectionData(klass);
+                UnsafeUtility.UNSAFE.freeMemory(replacementMethodsAddress);
+                throw exception;
+            }
+        }
+    }
+
     public static void addStaticField(
             Class<?> klass, String fieldName, String backingFieldName, int modifiers) {
         Objects.requireNonNull(klass, "klass");
