@@ -4,13 +4,30 @@ import io.github.seraphina.agent.api.SeraTransImpl;
 
 import java.lang.instrument.IllegalClassFormatException;
 import java.security.ProtectionDomain;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class Agent {
     private static final AtomicBoolean onStart = new AtomicBoolean(false);
+    private static final AtomicInteger TRANSFORM_THREAD_ID = new AtomicInteger();
+    private static final ExecutorService TRANSFORM_EXECUTOR = Executors.newFixedThreadPool(
+            Math.max(2, Runtime.getRuntime().availableProcessors()),
+            runnable -> {
+                Thread thread = new Thread(
+                        runnable,
+                        "sera-agent-transform-" + TRANSFORM_THREAD_ID.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            });
 
     public static final Set<SeraTransImpl> transformers = new CopyOnWriteArraySet<>();
 
@@ -41,20 +58,60 @@ public final class Agent {
         if (loadedClasses == null) {
             throw new NullPointerException("loadedClasses");
         }
+        if (loadedClasses.length == 0) {
+            return;
+        }
 
         for (Class<?> loadedClass : loadedClasses) {
             if (loadedClass == null) {
                 throw new NullPointerException("loadedClass");
             }
-            for (SeraTransImpl seraTransImpl : transformers) {
-                if (seraTransImpl != null) {
-                    seraTransImpl.transform(
-                            loadedClass.getClassLoader(),
-                            loadedClass.getName().replace('.', '/'),
-                            loadedClass,
-                            loadedClass.getProtectionDomain(),
-                            null);
+        }
+
+        SeraTransImpl[] activeTransformers = transformers.toArray(SeraTransImpl[]::new);
+        if (loadedClasses.length == 1) {
+            transformClass(loadedClasses[0], activeTransformers);
+            return;
+        }
+
+        List<Callable<Void>> tasks = new ArrayList<>(loadedClasses.length);
+        for (Class<?> loadedClass : loadedClasses) {
+            tasks.add(() -> {
+                transformClass(loadedClass, activeTransformers);
+                return null;
+            });
+        }
+
+        try {
+            for (Future<Void> future : TRANSFORM_EXECUTOR.invokeAll(tasks)) {
+                try {
+                    future.get();
+                } catch (ExecutionException exception) {
+                    Throwable cause = exception.getCause();
+                    if (cause instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    }
+                    if (cause instanceof Error error) {
+                        throw error;
+                    }
+                    throw new IllegalStateException(cause);
                 }
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while transforming classes", exception);
+        }
+    }
+
+    private static void transformClass(Class<?> loadedClass, SeraTransImpl[] activeTransformers) {
+        for (SeraTransImpl seraTransImpl : activeTransformers) {
+            if (seraTransImpl != null) {
+                seraTransImpl.transform(
+                        loadedClass.getClassLoader(),
+                        loadedClass.getName().replace('.', '/'),
+                        loadedClass,
+                        loadedClass.getProtectionDomain(),
+                        null);
             }
         }
     }
