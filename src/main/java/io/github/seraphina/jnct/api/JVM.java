@@ -32,6 +32,7 @@ public final class JVM {
     public final long resolvedMethodNameVmtargetOffset;
     public final long methodConstMethodOffset;
     public final long methodVtableIndexOffset;
+    public final int methodNonvirtualVtableIndex;
 
     public final long constMethodConstantsOffset;
     public final long constMethodCodeSizeOffset;
@@ -42,11 +43,14 @@ public final class JVM {
 
     public final long constantPoolLengthOffset;
     public final long constantPoolEntriesOffset;
+    public final long constantPoolTagsOffset;
+    public final long klassConstantsOffset;
 
     /** The length field of a native HotSpot Array&lt;T&gt;. */
     public final long metadataArrayLengthOffset;
     /** The first element of a native HotSpot Array&lt;T&gt;. */
     public final long metadataArrayElementsOffset;
+    public final long metadataU1ArrayElementsOffset;
     /** The first u2 element of the native HotSpot Array&lt;u2&gt; used by InstanceKlass fields. */
     public final long metadataU2ArrayElementsOffset;
 
@@ -112,6 +116,7 @@ public final class JVM {
         resolvedMethodNameVmtargetOffset = 0L;
         methodConstMethodOffset = 0L;
         methodVtableIndexOffset = 0L;
+        methodNonvirtualVtableIndex = 0;
         constMethodConstantsOffset = 0L;
         constMethodCodeSizeOffset = 0L;
         constMethodNameIndexOffset = 0L;
@@ -120,8 +125,11 @@ public final class JVM {
         constMethodCodeOffset = 0L;
         constantPoolLengthOffset = 0L;
         constantPoolEntriesOffset = 0L;
+        constantPoolTagsOffset = 0L;
+        klassConstantsOffset = 0L;
         metadataArrayLengthOffset = 0L;
         metadataArrayElementsOffset = 0L;
+        metadataU1ArrayElementsOffset = 0L;
         metadataU2ArrayElementsOffset = 0L;
         javaArrayLengthOffset = 0L;
         javaArrayElementsOffset = 0L;

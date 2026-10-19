@@ -21,6 +21,7 @@ public class SeraLegitHook {
     private static long RESOLVED_METHOD_NAME_VMTARGET_OFFSET;
     private static long METHOD_CONST_METHOD_OFFSET;
     private static long METHOD_VTABLE_INDEX_OFFSET;
+    private static int METHOD_NONVIRTUAL_VTABLE_INDEX;
     private static long CONST_METHOD_CONSTANTS_OFFSET;
     private static long CONST_METHOD_CODE_SIZE_OFFSET;
     private static long CONST_METHOD_NAME_INDEX_OFFSET;
@@ -29,6 +30,9 @@ public class SeraLegitHook {
     private static long CONST_METHOD_CODE_OFFSET;
     private static long CONSTANT_POOL_LENGTH_OFFSET;
     private static long CONSTANT_POOL_ENTRIES_OFFSET;
+    private static long CONSTANT_POOL_TAGS_OFFSET;
+    private static long KLASS_CONSTANTS_OFFSET;
+    private static long U1_ARRAY_ELEMENTS_OFFSET;
     private static long ARRAY_LENGTH_OFFSET;
     private static long SHORT_ARRAY_ELEMENTS_OFFSET;
     private static long ARRAY_ELEMENTS_OFFSET;
@@ -62,6 +66,7 @@ public class SeraLegitHook {
             new ConcurrentHashMap<>();
     private static final Map<String, InjectedMethod> INJECTED_METHODS = new ConcurrentHashMap<>();
     private static final Set<Long> INJECTED_FIELD_ARRAYS = ConcurrentHashMap.newKeySet();
+    private static final Set<Class<?>> CONSTANT_POOL_UTF8_DONORS = ConcurrentHashMap.newKeySet();
 
     private static volatile boolean initialized;
     private static Class<?> directMethodHandleClass;
@@ -196,13 +201,30 @@ public class SeraLegitHook {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(methodName, "methodName");
         Objects.requireNonNull(methodBody, "methodBody");
+        addMethod(klass, methodName, methodBody, null, true);
+    }
+
+    public static void addInstanceMethod(
+            Class<?> klass, String methodName, Consumer<Object> methodBody) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(methodName, "methodName");
+        Objects.requireNonNull(methodBody, "methodBody");
+        addMethod(klass, methodName, null, methodBody, false);
+    }
+
+    private static void addMethod(
+            Class<?> klass,
+            String methodName,
+            Runnable staticBody,
+            Consumer<Object> instanceBody,
+            boolean staticMethod) {
 
         synchronized (SeraLegitHook.class) {
             initialize();
             if (klass.isArray() || klass.isPrimitive() || klass.isInterface()
                     || Modifier.isAbstract(klass.getModifiers())) {
                 throw new IllegalArgumentException(
-                        "addMethod requires a concrete class: " + klass.getTypeName());
+                        "Method injection requires a concrete class: " + klass.getTypeName());
             }
             if (!isAsciiJavaIdentifier(methodName)) {
                 throw new IllegalArgumentException(
@@ -225,10 +247,19 @@ public class SeraLegitHook {
             boolean installed = false;
 
             try {
-                INJECTED_METHOD_BODIES.put(callbackId, NO_OP);
-                Class<?> donorClass = createDonorClass(callbackId, methodName);
+                if (staticMethod) {
+                    INJECTED_METHOD_BODIES.put(callbackId, NO_OP);
+                } else {
+                    INJECTED_INSTANCE_METHOD_BODIES.put(callbackId, NO_OP_INSTANCE);
+                }
+                Class<?> donorClass = staticMethod
+                        ? createDonorClass(callbackId, methodName)
+                        : createInstanceDonorClass(callbackId, methodName);
                 Method donorMethod = donorClass.getDeclaredMethod(methodName);
-                donorMethod.invoke(null);
+                Object donor = staticMethod
+                        ? null
+                        : donorClass.getDeclaredConstructor().newInstance();
+                donorMethod.invoke(donor);
 
                 MethodLocation donorLocation = locate(donorMethod);
                 verifyMethodName(donorLocation, methodName);
@@ -249,6 +280,11 @@ public class SeraLegitHook {
                 UnsafeUtility.UNSAFE.putShort(
                         donorLocation.constMethodAddress + CONST_METHOD_ORIGINAL_METHOD_IDNUM_OFFSET,
                         (short) methodId);
+                if (!staticMethod) {
+                    UnsafeUtility.UNSAFE.putInt(
+                            donorLocation.methodAddress + METHOD_VTABLE_INDEX_OFFSET,
+                            METHOD_NONVIRTUAL_VTABLE_INDEX);
+                }
                 UnsafeUtility.UNSAFE.putLongVolatile(null, poolHolderAddress, targetKlassAddress);
 
                 replacementMethodsAddress = expandedMethodArray(
@@ -259,11 +295,15 @@ public class SeraLegitHook {
                 clearReflectionData(klass);
 
                 Method injectedMethod = klass.getDeclaredMethod(methodName);
-                verifyInjectedMethod(klass, injectedMethod);
+                verifyInjectedMethod(klass, injectedMethod, staticMethod);
 
                 INJECTED_METHODS.put(
                         callbackId, new InjectedMethod(donorClass, replacementMethodsAddress));
-                INJECTED_METHOD_BODIES.put(callbackId, methodBody);
+                if (staticMethod) {
+                    INJECTED_METHOD_BODIES.put(callbackId, staticBody);
+                } else {
+                    INJECTED_INSTANCE_METHOD_BODIES.put(callbackId, instanceBody);
+                }
             } catch (Throwable throwable) {
                 if (installed) {
                     UnsafeUtility.UNSAFE.putLongVolatile(
@@ -277,7 +317,11 @@ public class SeraLegitHook {
                     UnsafeUtility.UNSAFE.freeMemory(replacementMethodsAddress);
                 }
                 clearReflectionData(klass);
-                INJECTED_METHOD_BODIES.remove(callbackId);
+                if (staticMethod) {
+                    INJECTED_METHOD_BODIES.remove(callbackId);
+                } else {
+                    INJECTED_INSTANCE_METHOD_BODIES.remove(callbackId);
+                }
                 throw addMethodFailure(klass, methodName, throwable);
             }
         }
@@ -381,6 +425,23 @@ public class SeraLegitHook {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(fieldName, "fieldName");
         Objects.requireNonNull(backingFieldName, "backingFieldName");
+        addField(klass, fieldName, backingFieldName, modifiers, true);
+    }
+
+    public static void addInstanceField(
+            Class<?> klass, String fieldName, String backingFieldName, int modifiers) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(fieldName, "fieldName");
+        Objects.requireNonNull(backingFieldName, "backingFieldName");
+        addField(klass, fieldName, backingFieldName, modifiers, false);
+    }
+
+    private static void addField(
+            Class<?> klass,
+            String fieldName,
+            String backingFieldName,
+            int modifiers,
+            boolean staticField) {
 
         synchronized (SeraLegitHook.class) {
             initialize();
@@ -389,8 +450,9 @@ public class SeraLegitHook {
                         "Field name must be an ASCII Java identifier: " + fieldName);
             }
             validateFieldModifiers(modifiers);
-            if (!Modifier.isStatic(modifiers)) {
-                throw new IllegalArgumentException("An added live field must be static");
+            if (Modifier.isStatic(modifiers) != staticField) {
+                throw new IllegalArgumentException(
+                        "An added live field must be " + (staticField ? "static" : "non-static"));
             }
             try {
                 klass.getDeclaredField(fieldName);
@@ -401,13 +463,14 @@ public class SeraLegitHook {
             }
 
             Field backingField = requireDeclaredField(klass, backingFieldName);
-            if (!Modifier.isStatic(backingField.getModifiers())) {
+            if (Modifier.isStatic(backingField.getModifiers()) != staticField) {
                 throw new IllegalArgumentException(
-                        "The backing field must be static: " + backingField);
+                        "The backing field must be "
+                                + (staticField ? "static" : "non-static") + ": " + backingField);
             }
 
             long originalFieldsAddress = fieldArrayAddress(klass);
-            int fieldNameIndex = findConstantPoolUtf8Index(klass, fieldName);
+            int fieldNameIndex = ensureConstantPoolUtf8Index(klass, fieldName);
             int backingFieldIndex = findFieldIndex(klass, originalFieldsAddress, backingField);
             short[] backingFieldInfo = copyFieldInfo(originalFieldsAddress, backingFieldIndex);
             backingFieldInfo[FIELD_NAME_INDEX_OFFSET] = unsignedShort(fieldNameIndex);
@@ -763,6 +826,143 @@ public class SeraLegitHook {
         return Short.toUnsignedInt(value);
     }
 
+    private static int ensureConstantPoolUtf8Index(Class<?> klass, String value) {
+        try {
+            return findConstantPoolUtf8Index(klass, value);
+        } catch (IllegalArgumentException missingEntry) {
+            long donorId = NEXT_INJECTED_METHOD_ID.incrementAndGet();
+            String donorName = SeraLegitHook.class.getPackageName()
+                    + ".ConstantPoolUtf8Donor" + donorId;
+            Class<?> donorClass = new DonorClassLoader(SeraLegitHook.class.getClassLoader())
+                    .define(donorName, createDonorBytecode(
+                            donorName,
+                            value,
+                            Long.toUnsignedString(donorId, Character.MAX_RADIX)));
+            CONSTANT_POOL_UTF8_DONORS.add(donorClass);
+            MethodLocation donorLocation;
+            try {
+                donorLocation = locate(donorClass.getDeclaredMethod(value));
+            } catch (ReflectiveOperationException exception) {
+                throw new IllegalStateException(
+                        "Could not locate the constant-pool UTF-8 donor", exception);
+            }
+            long donorPoolAddress = UnsafeUtility.UNSAFE.getLong(
+                    donorLocation.constMethodAddress + CONST_METHOD_CONSTANTS_OFFSET);
+            if (!looksLikeNativePointer(donorPoolAddress)) {
+                throw new IllegalStateException("The constant-pool UTF-8 donor has no ConstantPool");
+            }
+            int donorIndex = findConstantPoolUtf8Index(donorClass, value);
+            long symbolAddress = UnsafeUtility.UNSAFE.getLong(
+                    donorPoolAddress + CONSTANT_POOL_ENTRIES_OFFSET
+                            + (long) donorIndex * Long.BYTES);
+            if (!looksLikeNativePointer(symbolAddress)) {
+                throw new IllegalStateException("The constant-pool UTF-8 donor has no Symbol");
+            }
+
+            long klassAddress = klassPointer(klass);
+            long originalPoolAddress = UnsafeUtility.UNSAFE.getLong(
+                    klassAddress + KLASS_CONSTANTS_OFFSET);
+            if (!looksLikeNativePointer(originalPoolAddress)) {
+                throw new IllegalStateException("The target class has no ConstantPool");
+            }
+            int originalLength = constantPoolLength(originalPoolAddress);
+            if (originalLength >= 0xFFFF) {
+                throw new IllegalStateException("The target constant pool is full");
+            }
+            int replacementLength = originalLength + 1;
+            long originalTagsAddress = UnsafeUtility.UNSAFE.getLong(
+                    originalPoolAddress + CONSTANT_POOL_TAGS_OFFSET);
+            if (!looksLikeNativePointer(originalTagsAddress)
+                    || UnsafeUtility.UNSAFE.getInt(originalTagsAddress + ARRAY_LENGTH_OFFSET)
+                    != originalLength) {
+                throw new IllegalStateException("The target constant pool tag array is inconsistent");
+            }
+
+            long methodsAddress = UnsafeUtility.UNSAFE.getLong(klassAddress + methodsOffset);
+            int methodCount = methodArrayLength(methodsAddress);
+            long[] constMethodAddresses = new long[methodCount];
+            for (int index = 0; index < methodCount; index++) {
+                long methodAddress = UnsafeUtility.UNSAFE.getLong(
+                        methodsAddress + ARRAY_ELEMENTS_OFFSET + (long) index * Long.BYTES);
+                if (!looksLikeNativePointer(methodAddress)) {
+                    throw new IllegalStateException("The target method array contains an invalid Method");
+                }
+                long constMethodAddress = UnsafeUtility.UNSAFE.getLong(
+                        methodAddress + METHOD_CONST_METHOD_OFFSET);
+                if (!looksLikeNativePointer(constMethodAddress)) {
+                    throw new IllegalStateException("A target method has no ConstMethod");
+                }
+                constMethodAddresses[index] = constMethodAddress;
+            }
+
+            long replacementTagsAddress = UnsafeUtility.UNSAFE.allocateMemory(
+                    U1_ARRAY_ELEMENTS_OFFSET + (long) replacementLength);
+            long replacementPoolAddress = UnsafeUtility.UNSAFE.allocateMemory(
+                    CONSTANT_POOL_ENTRIES_OFFSET + (long) replacementLength * Long.BYTES);
+            boolean replacementPublished = false;
+            try {
+                UnsafeUtility.UNSAFE.copyMemory(
+                        null,
+                        originalTagsAddress,
+                        null,
+                        replacementTagsAddress,
+                        U1_ARRAY_ELEMENTS_OFFSET + (long) originalLength);
+                UnsafeUtility.UNSAFE.putInt(
+                        replacementTagsAddress + ARRAY_LENGTH_OFFSET, replacementLength);
+                UnsafeUtility.UNSAFE.putByte(
+                        replacementTagsAddress + U1_ARRAY_ELEMENTS_OFFSET + originalLength,
+                        (byte) 1);
+
+                UnsafeUtility.UNSAFE.copyMemory(
+                        null,
+                        originalPoolAddress,
+                        null,
+                        replacementPoolAddress,
+                        CONSTANT_POOL_ENTRIES_OFFSET + (long) originalLength * Long.BYTES);
+                UnsafeUtility.UNSAFE.putInt(
+                        replacementPoolAddress + CONSTANT_POOL_LENGTH_OFFSET, replacementLength);
+                UnsafeUtility.UNSAFE.putLong(
+                        replacementPoolAddress + CONSTANT_POOL_TAGS_OFFSET,
+                        replacementTagsAddress);
+                UnsafeUtility.UNSAFE.putLong(
+                        replacementPoolAddress + CONSTANT_POOL_ENTRIES_OFFSET
+                                + (long) originalLength * Long.BYTES,
+                        symbolAddress);
+
+                replacementPublished = true;
+                for (long constMethodAddress : constMethodAddresses) {
+                    if (UnsafeUtility.UNSAFE.getLong(
+                            constMethodAddress + CONST_METHOD_CONSTANTS_OFFSET)
+                            == originalPoolAddress) {
+                        UnsafeUtility.UNSAFE.putLong(
+                                constMethodAddress + CONST_METHOD_CONSTANTS_OFFSET,
+                                replacementPoolAddress);
+                    }
+                }
+                UnsafeUtility.UNSAFE.putLongVolatile(
+                        null, klassAddress + KLASS_CONSTANTS_OFFSET, replacementPoolAddress);
+                clearReflectionData(klass);
+                return originalLength;
+            } catch (RuntimeException | Error exception) {
+                if (!replacementPublished) {
+                    UnsafeUtility.UNSAFE.freeMemory(replacementTagsAddress);
+                    UnsafeUtility.UNSAFE.freeMemory(replacementPoolAddress);
+                }
+                throw exception;
+            }
+        }
+    }
+
+    private static int constantPoolLength(long constantPoolAddress) {
+        int length = UnsafeUtility.UNSAFE.getInt(
+                constantPoolAddress + CONSTANT_POOL_LENGTH_OFFSET);
+        if (length <= 0 || length >= 0xFFFF) {
+            throw new IllegalStateException("Invalid HotSpot ConstantPool length " + length);
+        }
+        return length;
+    }
+
+
     private static int findConstantPoolUtf8Index(Class<?> klass, String value) {
         Object constantPool = constantPool(klass);
         int constantPoolSize = constantPoolSize(constantPool);
@@ -776,7 +976,6 @@ public class SeraLegitHook {
                 "The constant pool of " + klass.getName()
                         + " does not contain the UTF-8 constant " + value);
     }
-
 
     private static Object constantPool(Class<?> klass) {
         try {
@@ -1188,12 +1387,13 @@ public class SeraLegitHook {
         }
     }
 
-    private static void verifyInjectedMethod(Class<?> targetClass, Method injectedMethod) {
+    private static void verifyInjectedMethod(
+            Class<?> targetClass, Method injectedMethod, boolean staticMethod) {
         if (injectedMethod.getDeclaringClass() != targetClass
                 || injectedMethod.getReturnType() != void.class
                 || injectedMethod.getParameterCount() != 0
                 || !Modifier.isPublic(injectedMethod.getModifiers())
-                || !Modifier.isStatic(injectedMethod.getModifiers())) {
+                || Modifier.isStatic(injectedMethod.getModifiers()) != staticMethod) {
             throw new IllegalStateException(
                     "JVM did not expose the injected method as "
                             + targetClass.getName() + "." + injectedMethod.getName() + "()");
@@ -1680,6 +1880,7 @@ public class SeraLegitHook {
                 RESOLVED_METHOD_NAME_VMTARGET_OFFSET = jvmLayout.resolvedMethodNameVmtargetOffset;
                 METHOD_CONST_METHOD_OFFSET = jvmLayout.methodConstMethodOffset;
                 METHOD_VTABLE_INDEX_OFFSET = jvmLayout.methodVtableIndexOffset;
+                METHOD_NONVIRTUAL_VTABLE_INDEX = jvmLayout.methodNonvirtualVtableIndex;
                 CONST_METHOD_CONSTANTS_OFFSET = jvmLayout.constMethodConstantsOffset;
                 CONST_METHOD_CODE_SIZE_OFFSET = jvmLayout.constMethodCodeSizeOffset;
                 CONST_METHOD_NAME_INDEX_OFFSET = jvmLayout.constMethodNameIndexOffset;
@@ -1689,6 +1890,9 @@ public class SeraLegitHook {
                 CONST_METHOD_CODE_OFFSET = jvmLayout.constMethodCodeOffset;
                 CONSTANT_POOL_LENGTH_OFFSET = jvmLayout.constantPoolLengthOffset;
                 CONSTANT_POOL_ENTRIES_OFFSET = jvmLayout.constantPoolEntriesOffset;
+                CONSTANT_POOL_TAGS_OFFSET = jvmLayout.constantPoolTagsOffset;
+                KLASS_CONSTANTS_OFFSET = jvmLayout.klassConstantsOffset;
+                U1_ARRAY_ELEMENTS_OFFSET = jvmLayout.metadataU1ArrayElementsOffset;
                 ARRAY_LENGTH_OFFSET = jvmLayout.metadataArrayLengthOffset;
                 SHORT_ARRAY_ELEMENTS_OFFSET = jvmLayout.metadataU2ArrayElementsOffset;
                 ARRAY_ELEMENTS_OFFSET = jvmLayout.metadataArrayElementsOffset;
@@ -1758,6 +1962,9 @@ public class SeraLegitHook {
         if (layout.fieldSlots <= 0 || layout.fieldSlots > MAX_FIELD_SLOTS) {
             throw new IllegalStateException("Invalid field slot count in JVM snapshot");
         }
+        if (layout.methodNonvirtualVtableIndex >= 0) {
+            throw new IllegalStateException("Invalid nonvirtual vtable index in JVM snapshot");
+        }
 
         long[] offsets = {
                 layout.resolvedMethodNameVmtargetOffset,
@@ -1771,8 +1978,11 @@ public class SeraLegitHook {
                 layout.constMethodCodeOffset,
                 layout.constantPoolLengthOffset,
                 layout.constantPoolEntriesOffset,
+                layout.constantPoolTagsOffset,
+                layout.klassConstantsOffset,
                 layout.metadataArrayLengthOffset,
                 layout.metadataArrayElementsOffset,
+                layout.metadataU1ArrayElementsOffset,
                 layout.metadataU2ArrayElementsOffset,
                 layout.javaArrayLengthOffset,
                 layout.javaArrayElementsOffset,

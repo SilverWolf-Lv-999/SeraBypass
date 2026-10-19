@@ -151,6 +151,17 @@ struct MethodLayout {
     probes: [ProbeMethod; 5],
 }
 
+struct ConstantPoolLayout {
+    const_method_constants_offset: usize,
+    length_offset: usize,
+    entries_offset: usize,
+    tags_offset: usize,
+    u1_elements_offset: usize,
+    symbol_length_offset: usize,
+    symbol_body_offset: usize,
+    name_index_offset: usize,
+}
+
 struct MethodsLayout {
     klass_offset: usize,
     array: usize,
@@ -179,6 +190,7 @@ struct Snapshot {
     resolved_method_name_vmtarget_offset: i64,
     method_const_method_offset: i64,
     method_vtable_index_offset: i64,
+    method_nonvirtual_vtable_index: i32,
     const_method_constants_offset: i64,
     const_method_code_size_offset: i64,
     const_method_name_index_offset: i64,
@@ -187,8 +199,11 @@ struct Snapshot {
     const_method_code_offset: i64,
     constant_pool_length_offset: i64,
     constant_pool_entries_offset: i64,
+    constant_pool_tags_offset: i64,
+    klass_constants_offset: i64,
     metadata_array_length_offset: i64,
     metadata_array_elements_offset: i64,
+    metadata_u1_array_elements_offset: i64,
     metadata_u2_array_elements_offset: i64,
     java_array_length_offset: i64,
     java_array_elements_offset: i64,
@@ -231,6 +246,7 @@ impl Snapshot {
             resolved_method_name_vmtarget_offset: 0,
             method_const_method_offset: 0,
             method_vtable_index_offset: 0,
+            method_nonvirtual_vtable_index: 0,
             const_method_constants_offset: 0,
             const_method_code_size_offset: 0,
             const_method_name_index_offset: 0,
@@ -239,8 +255,11 @@ impl Snapshot {
             const_method_code_offset: 0,
             constant_pool_length_offset: 0,
             constant_pool_entries_offset: 0,
+            constant_pool_tags_offset: 0,
+            klass_constants_offset: 0,
             metadata_array_length_offset: 0,
             metadata_array_elements_offset: 0,
+            metadata_u1_array_elements_offset: 0,
             metadata_u2_array_elements_offset: 0,
             java_array_length_offset: 0,
             java_array_elements_offset: 0,
@@ -538,23 +557,32 @@ unsafe fn probe(
     log::info("createJVM: const method layout resolved");
     snapshot.method_vtable_index_offset =
         locate_vtable_layout(environment, class_klass_offset)? as i64;
+    snapshot.method_nonvirtual_vtable_index =
+        read_u32(method_layout.first_method + snapshot.method_vtable_index_offset as usize)
+            .ok_or(&b"Could not read a static Method vtable index\0"[..])? as i32;
+    if snapshot.method_nonvirtual_vtable_index >= 0 {
+        return Err(b"Static Method does not expose a nonvirtual vtable index\0");
+    }
     log::info("createJVM: vtable index layout resolved");
     snapshot.vtable_start_offset =
         locate_vtable_start(environment, snapshot, class_klass_offset)? as i64;
     snapshot.metadata_address_prefix = (method_layout.first_method >> 32) as i64;
-    let constant_pool_class = find_class(environment, JVM_CLASS_NAME);
-    if constant_pool_class.is_null() {
-        clear_pending_exception(environment);
-        return Err(b"Could not resolve the JVM constant-pool probe class\0");
-    }
-    let pool_layout =
-        locate_constant_pool_layout(environment, constant_pool_class, &method_layout.probes)?;
-    snapshot.const_method_constants_offset = pool_layout.0 as i64;
-    snapshot.constant_pool_length_offset = pool_layout.1 as i64;
-    snapshot.constant_pool_entries_offset = pool_layout.2 as i64;
-    snapshot.symbol_length_offset = pool_layout.3 as i64;
-    snapshot.symbol_body_offset = pool_layout.4 as i64;
-    snapshot.const_method_name_index_offset = pool_layout.5 as i64;
+    let pool_layout = locate_constant_pool_layout(environment, jvm_class, &method_layout.probes)?;
+    snapshot.const_method_constants_offset = pool_layout.const_method_constants_offset as i64;
+    snapshot.constant_pool_length_offset = pool_layout.length_offset as i64;
+    snapshot.constant_pool_entries_offset = pool_layout.entries_offset as i64;
+    snapshot.constant_pool_tags_offset = pool_layout.tags_offset as i64;
+    snapshot.metadata_u1_array_elements_offset = pool_layout.u1_elements_offset as i64;
+    snapshot.symbol_length_offset = pool_layout.symbol_length_offset as i64;
+    snapshot.symbol_body_offset = pool_layout.symbol_body_offset as i64;
+    snapshot.const_method_name_index_offset = pool_layout.name_index_offset as i64;
+    let probe_pool = read_pointer(
+        method_layout.probes[0].const_method + pool_layout.const_method_constants_offset,
+    )
+    .ok_or(&b"Could not resolve the JVM probe ConstantPool\0"[..])?;
+    let probe_klass = class_klass_pointer(jvm_class, class_klass_offset);
+    snapshot.klass_constants_offset =
+        find_pointer_offset(probe_klass, probe_pool, MAX_KLASS_SCAN_BYTES)? as i64;
 
     log::info("createJVM: method layout resolved");
     let (klass_subklass_offset, klass_next_sibling_offset) =
@@ -639,6 +667,10 @@ unsafe fn populate_instance(
         b"methodVtableIndexOffset\0",
         snapshot.method_vtable_index_offset
     );
+    si!(
+        b"methodNonvirtualVtableIndex\0",
+        snapshot.method_nonvirtual_vtable_index
+    );
     sl!(
         b"constMethodConstantsOffset\0",
         snapshot.const_method_constants_offset
@@ -672,12 +704,21 @@ unsafe fn populate_instance(
         snapshot.constant_pool_entries_offset
     );
     sl!(
+        b"constantPoolTagsOffset\0",
+        snapshot.constant_pool_tags_offset
+    );
+    sl!(b"klassConstantsOffset\0", snapshot.klass_constants_offset);
+    sl!(
         b"metadataArrayLengthOffset\0",
         snapshot.metadata_array_length_offset
     );
     sl!(
         b"metadataArrayElementsOffset\0",
         snapshot.metadata_array_elements_offset
+    );
+    sl!(
+        b"metadataU1ArrayElementsOffset\0",
+        snapshot.metadata_u1_array_elements_offset
     );
     sl!(
         b"metadataU2ArrayElementsOffset\0",
@@ -1699,7 +1740,7 @@ unsafe fn locate_constant_pool_layout(
     environment: *mut JNIEnv,
     class: jclass,
     probes: &[ProbeMethod; 5],
-) -> Result<(usize, usize, usize, usize, usize, usize), &'static [u8]> {
+) -> Result<ConstantPoolLayout, &'static [u8]> {
     let class_class = find_class(environment, CLASS_CLASS_NAME);
     if class.is_null() || class_class.is_null() {
         clear_pending_exception(environment);
@@ -1808,6 +1849,7 @@ unsafe fn locate_constant_pool_layout(
                     if all {
                         result = Some((
                             const_offset,
+                            pool_address,
                             length_offset,
                             entries_offset,
                             symbol_length,
@@ -1825,7 +1867,7 @@ unsafe fn locate_constant_pool_layout(
             break;
         }
     }
-    let (const_offset, length_offset, entries_offset, symbol_length, symbol_body) =
+    let (const_offset, pool_address, length_offset, entries_offset, symbol_length, symbol_body) =
         result.ok_or(&b"Could not dynamically locate ConstantPool and Symbol layouts\0"[..])?;
     let mut name_index_offset = usize::MAX;
     for offset in (0..64).step_by(2) {
@@ -1837,18 +1879,46 @@ unsafe fn locate_constant_pool_layout(
     if name_index_offset == usize::MAX {
         return Err(b"Could not locate ConstMethod name index\0");
     }
+    let mut tags_layout = None;
+    for tags_offset in (0..128).step_by(8) {
+        let tags = read_pointer(pool_address + tags_offset).unwrap_or(0);
+        if !plausible_pointer(tags) {
+            continue;
+        }
+        for tags_length_offset in (0..16).step_by(4) {
+            if read_u32(tags + tags_length_offset) != Some(pool_size as u32) {
+                continue;
+            }
+            for u1_elements_offset in (tags_length_offset + 4)..(tags_length_offset + 16) {
+                if read_u8(tags + u1_elements_offset) != Some(0)
+                    || !(0..5).all(|index| {
+                        read_u8(tags + u1_elements_offset + names[index] as usize) == Some(1)
+                    })
+                {
+                    continue;
+                }
+                if tags_layout.is_some() {
+                    return Err(b"Could not uniquely locate ConstantPool tags\0");
+                }
+                tags_layout = Some((tags_offset, u1_elements_offset));
+            }
+        }
+    }
+    let (tags_offset, u1_elements_offset) =
+        tags_layout.ok_or(&b"Could not locate ConstantPool tags\0"[..])?;
     delete_local_reference(environment, pool);
-    delete_local_reference(environment, class.cast());
     delete_local_reference(environment, class_class.cast());
     delete_local_reference(environment, pool_class.cast());
-    Ok((
-        const_offset,
+    Ok(ConstantPoolLayout {
+        const_method_constants_offset: const_offset,
         length_offset,
         entries_offset,
-        symbol_length,
-        symbol_body,
+        tags_offset,
+        u1_elements_offset,
+        symbol_length_offset: symbol_length,
+        symbol_body_offset: symbol_body,
         name_index_offset,
-    ))
+    })
 }
 unsafe fn bytes_equal_raw(address: *const u8, expected: &[u8], length: usize) -> bool {
     for index in 0..length {
