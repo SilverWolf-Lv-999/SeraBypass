@@ -215,6 +215,41 @@ struct Snapshot {
     klass_java_mirror_offset: i64,
     klass_subklass_offset: i64,
     klass_next_sibling_offset: i64,
+    klass_name_offset: i64,
+    klass_super_offset: i64,
+    klass_next_link_offset: i64,
+    klass_class_loader_data_offset: i64,
+    klass_vtable_len_offset: i64,
+    klass_access_flags_offset: i64,
+    klass_layout_helper_offset: i64,
+    instance_klass_nonstatic_field_size_offset: i64,
+    instance_klass_static_field_size_offset: i64,
+    instance_klass_nonstatic_oop_map_size_offset: i64,
+    instance_klass_itable_len_offset: i64,
+    instance_klass_init_state_offset: i64,
+    constant_pool_holder_offset: i64,
+    constant_pool_cache_offset: i64,
+    constant_pool_resolved_klasses_offset: i64,
+    constant_pool_cache_length_offset: i64,
+    constant_pool_cache_constant_pool_offset: i64,
+    constant_pool_cache_resolved_references_offset: i64,
+    constant_pool_cache_reference_map_offset: i64,
+    constant_pool_cache_entry_size: i64,
+    class_loader_data_class_loader_offset: i64,
+    class_loader_data_klasses_offset: i64,
+    class_loader_data_dictionary_offset: i64,
+    class_loader_data_next_offset: i64,
+    class_loader_data_graph_head_address: i64,
+    dictionary_table_size_offset: i64,
+    dictionary_buckets_offset: i64,
+    dictionary_bucket_size: i64,
+    hashtable_bucket_entry_offset: i64,
+    basic_hashtable_entry_hash_offset: i64,
+    basic_hashtable_entry_next_offset: i64,
+    dictionary_entry_literal_offset: i64,
+    dictionary_entry_pd_set_offset: i64,
+    method_code_offset: i64,
+    method_access_flags_offset: i64,
     direct_method_handle_member_offset: i64,
     member_name_resolved_method_offset: i64,
     reference_slot_value_offset: i64,
@@ -271,6 +306,41 @@ impl Snapshot {
             klass_java_mirror_offset: 0,
             klass_subklass_offset: 0,
             klass_next_sibling_offset: 0,
+            klass_name_offset: 0,
+            klass_super_offset: 0,
+            klass_next_link_offset: 0,
+            klass_class_loader_data_offset: 0,
+            klass_vtable_len_offset: 0,
+            klass_access_flags_offset: 0,
+            klass_layout_helper_offset: 0,
+            instance_klass_nonstatic_field_size_offset: 0,
+            instance_klass_static_field_size_offset: 0,
+            instance_klass_nonstatic_oop_map_size_offset: 0,
+            instance_klass_itable_len_offset: 0,
+            instance_klass_init_state_offset: 0,
+            constant_pool_holder_offset: 0,
+            constant_pool_cache_offset: 0,
+            constant_pool_resolved_klasses_offset: 0,
+            constant_pool_cache_length_offset: 0,
+            constant_pool_cache_constant_pool_offset: 0,
+            constant_pool_cache_resolved_references_offset: 0,
+            constant_pool_cache_reference_map_offset: 0,
+            constant_pool_cache_entry_size: 0,
+            class_loader_data_class_loader_offset: 0,
+            class_loader_data_klasses_offset: 0,
+            class_loader_data_dictionary_offset: 0,
+            class_loader_data_next_offset: 0,
+            class_loader_data_graph_head_address: 0,
+            dictionary_table_size_offset: 0,
+            dictionary_buckets_offset: 0,
+            dictionary_bucket_size: 0,
+            hashtable_bucket_entry_offset: 0,
+            basic_hashtable_entry_hash_offset: 0,
+            basic_hashtable_entry_next_offset: 0,
+            dictionary_entry_literal_offset: 0,
+            dictionary_entry_pd_set_offset: 0,
+            method_code_offset: 0,
+            method_access_flags_offset: 0,
             direct_method_handle_member_offset: 0,
             member_name_resolved_method_offset: 0,
             reference_slot_value_offset: 0,
@@ -328,6 +398,7 @@ pub unsafe fn create_instance(environment: *mut JNIEnv, arguments: jobject) -> j
             copy_error(&mut error, message)
         }
     };
+    log::info("createJVM: before populate");
     if let Err(_message) = populate_instance(
         environment,
         instance,
@@ -339,7 +410,9 @@ pub unsafe fn create_instance(environment: *mut JNIEnv, arguments: jobject) -> j
         log::error("Could not populate JVM layout snapshot");
         clear_pending_exception(environment);
     }
+    log::info("createJVM: after populate");
     delete_local_reference(environment, class.cast());
+    log::info("createJVM: after class local reference release");
     instance
 }
 
@@ -383,6 +456,49 @@ unsafe fn probe(
         return Err(b"The JVM layout probe requires a 64-bit HotSpot VM\0");
     }
     log::info("createJVM: core offsets resolved");
+    snapshot.constant_pool_cache_entry_size = crate::vm_structs::type_size(b"ConstantPoolCacheEntry\0")
+        .ok_or(&b"VMStructs is missing ConstantPoolCacheEntry size\0"[..])? as i64;
+    snapshot.dictionary_bucket_size = crate::vm_structs::type_size(b"HashtableBucket<mtInternal>\0")
+        .ok_or(&b"VMStructs is missing HashtableBucket size\0"[..])? as i64;
+    snapshot.klass_name_offset = vm_field(b"Klass\0", b"_name\0")?;
+    snapshot.klass_super_offset = vm_field(b"Klass\0", b"_super\0")?;
+    snapshot.klass_next_link_offset = vm_field(b"Klass\0", b"_next_link\0")?;
+    snapshot.klass_class_loader_data_offset = vm_field(b"Klass\0", b"_class_loader_data\0")?;
+    snapshot.klass_vtable_len_offset = vm_field(b"Klass\0", b"_vtable_len\0")?;
+    snapshot.klass_access_flags_offset = vm_field(b"Klass\0", b"_access_flags\0")?;
+    snapshot.klass_layout_helper_offset = vm_field(b"Klass\0", b"_layout_helper\0")?;
+    snapshot.instance_klass_nonstatic_field_size_offset = vm_field(b"InstanceKlass\0", b"_nonstatic_field_size\0")?;
+    snapshot.instance_klass_static_field_size_offset = vm_field(b"InstanceKlass\0", b"_static_field_size\0")?;
+    snapshot.instance_klass_nonstatic_oop_map_size_offset = vm_field(b"InstanceKlass\0", b"_nonstatic_oop_map_size\0")?;
+    snapshot.instance_klass_itable_len_offset = vm_field(b"InstanceKlass\0", b"_itable_len\0")?;
+    snapshot.instance_klass_init_state_offset = vm_field(b"InstanceKlass\0", b"_init_state\0")?;
+    snapshot.constant_pool_holder_offset = vm_field(b"ConstantPool\0", b"_pool_holder\0")?;
+    snapshot.constant_pool_cache_offset = vm_field(b"ConstantPool\0", b"_cache\0")?;
+    snapshot.constant_pool_resolved_klasses_offset = vm_field(b"ConstantPool\0", b"_resolved_klasses\0")?;
+    snapshot.constant_pool_cache_length_offset = vm_field(b"ConstantPoolCache\0", b"_length\0")?;
+    snapshot.constant_pool_cache_constant_pool_offset = vm_field(b"ConstantPoolCache\0", b"_constant_pool\0")?;
+    snapshot.constant_pool_cache_resolved_references_offset = vm_field(b"ConstantPoolCache\0", b"_resolved_references\0")?;
+    snapshot.constant_pool_cache_reference_map_offset = vm_field(b"ConstantPoolCache\0", b"_reference_map\0")?;
+    snapshot.class_loader_data_class_loader_offset = vm_field(b"ClassLoaderData\0", b"_class_loader\0")?;
+    snapshot.class_loader_data_klasses_offset = vm_field(b"ClassLoaderData\0", b"_klasses\0")?;
+    snapshot.class_loader_data_dictionary_offset = vm_field(b"ClassLoaderData\0", b"_dictionary\0")?;
+    snapshot.class_loader_data_next_offset = vm_field(b"ClassLoaderData\0", b"_next\0")?;
+    snapshot.class_loader_data_graph_head_address =
+        vm_static_address(b"ClassLoaderDataGraph\0", b"_head\0")?;
+    snapshot.dictionary_table_size_offset =
+        vm_field(b"BasicHashtable<mtInternal>\0", b"_table_size\0")?;
+    snapshot.dictionary_buckets_offset =
+        vm_field(b"BasicHashtable<mtInternal>\0", b"_buckets\0")?;
+    snapshot.hashtable_bucket_entry_offset =
+        vm_field(b"HashtableBucket<mtInternal>\0", b"_entry\0")?;
+    snapshot.basic_hashtable_entry_hash_offset =
+        vm_field(b"BasicHashtableEntry<mtInternal>\0", b"_hash\0")?;
+    snapshot.basic_hashtable_entry_next_offset =
+        vm_field(b"BasicHashtableEntry<mtInternal>\0", b"_next\0")?;
+    snapshot.dictionary_entry_literal_offset = vm_field(b"IntptrHashtableEntry\0", b"_literal\0")?;
+    snapshot.dictionary_entry_pd_set_offset = 0;
+    snapshot.method_code_offset = vm_field(b"Method\0", b"_code\0")?;
+    snapshot.method_access_flags_offset = vm_field(b"Method\0", b"_access_flags\0")?;
     let object_array_class = find_class(environment, b"[Ljava/lang/Object;\0");
     let short_array_class = find_class(environment, b"[S\0");
     if object_array_class.is_null() || short_array_class.is_null() {
@@ -632,6 +748,20 @@ unsafe fn probe(
     Ok(())
 }
 
+
+fn vm_static_address(type_name: &[u8], field_name: &[u8]) -> Result<i64, &'static [u8]> {
+    crate::vm_structs::field(type_name, field_name)
+        .filter(|entry| entry.is_static)
+        .map(|entry| entry.address as i64)
+        .ok_or(&b"VMStructs is missing a required static field\0"[..])
+}
+
+fn vm_field(type_name: &[u8], field_name: &[u8]) -> Result<i64, &'static [u8]> {
+    crate::vm_structs::field(type_name, field_name)
+        .map(|entry| entry.offset as i64)
+        .ok_or(&b"VMStructs is missing a required field\0"[..])
+}
+
 unsafe fn populate_instance(
     environment: *mut JNIEnv,
     instance: jobject,
@@ -640,6 +770,7 @@ unsafe fn populate_instance(
     error: &[u8; MAX_ERROR_LENGTH],
     error_length: usize,
 ) -> Result<(), &'static [u8]> {
+    log::info("createJVM: populate started");
     macro_rules! sl {
         ($n:expr, $v:expr) => {
             set_long_field(environment, instance, class, $n, $v)?;
@@ -757,6 +888,40 @@ unsafe fn populate_instance(
         b"klassNextSiblingOffset\0",
         snapshot.klass_next_sibling_offset
     );
+    sl!(b"klassNameOffset\0", snapshot.klass_name_offset);
+    sl!(b"klassSuperOffset\0", snapshot.klass_super_offset);
+    sl!(b"klassNextLinkOffset\0", snapshot.klass_next_link_offset);
+    sl!(b"klassClassLoaderDataOffset\0", snapshot.klass_class_loader_data_offset);
+    sl!(b"klassVtableLenOffset\0", snapshot.klass_vtable_len_offset);
+    sl!(b"klassAccessFlagsOffset\0", snapshot.klass_access_flags_offset);
+    sl!(b"klassLayoutHelperOffset\0", snapshot.klass_layout_helper_offset);
+    sl!(b"instanceKlassNonstaticFieldSizeOffset\0", snapshot.instance_klass_nonstatic_field_size_offset);
+    sl!(b"instanceKlassStaticFieldSizeOffset\0", snapshot.instance_klass_static_field_size_offset);
+    sl!(b"instanceKlassNonstaticOopMapSizeOffset\0", snapshot.instance_klass_nonstatic_oop_map_size_offset);
+    sl!(b"instanceKlassItableLenOffset\0", snapshot.instance_klass_itable_len_offset);
+    sl!(b"instanceKlassInitStateOffset\0", snapshot.instance_klass_init_state_offset);
+    sl!(b"constantPoolHolderOffset\0", snapshot.constant_pool_holder_offset);
+    sl!(b"constantPoolCacheOffset\0", snapshot.constant_pool_cache_offset);
+    sl!(b"constantPoolResolvedKlassesOffset\0", snapshot.constant_pool_resolved_klasses_offset);
+    sl!(b"constantPoolCacheLengthOffset\0", snapshot.constant_pool_cache_length_offset);
+    sl!(b"constantPoolCacheConstantPoolOffset\0", snapshot.constant_pool_cache_constant_pool_offset);
+    sl!(b"constantPoolCacheResolvedReferencesOffset\0", snapshot.constant_pool_cache_resolved_references_offset);
+    sl!(b"constantPoolCacheReferenceMapOffset\0", snapshot.constant_pool_cache_reference_map_offset);
+    sl!(b"constantPoolCacheEntrySize\0", snapshot.constant_pool_cache_entry_size);
+    sl!(b"classLoaderDataClassLoaderOffset\0", snapshot.class_loader_data_class_loader_offset);
+    sl!(b"classLoaderDataKlassesOffset\0", snapshot.class_loader_data_klasses_offset);
+    sl!(b"classLoaderDataDictionaryOffset\0", snapshot.class_loader_data_dictionary_offset);
+    sl!(b"classLoaderDataNextOffset\0", snapshot.class_loader_data_next_offset);
+    sl!(b"dictionaryTableSizeOffset\0", snapshot.dictionary_table_size_offset);
+    sl!(b"dictionaryBucketsOffset\0", snapshot.dictionary_buckets_offset);
+    sl!(b"dictionaryBucketSize\0", snapshot.dictionary_bucket_size);
+    sl!(b"hashtableBucketEntryOffset\0", snapshot.hashtable_bucket_entry_offset);
+    sl!(b"basicHashtableEntryHashOffset\0", snapshot.basic_hashtable_entry_hash_offset);
+    sl!(b"basicHashtableEntryNextOffset\0", snapshot.basic_hashtable_entry_next_offset);
+    sl!(b"dictionaryEntryLiteralOffset\0", snapshot.dictionary_entry_literal_offset);
+    sl!(b"dictionaryEntryPdSetOffset\0", snapshot.dictionary_entry_pd_set_offset);
+    sl!(b"methodCodeOffset\0", snapshot.method_code_offset);
+    sl!(b"methodAccessFlagsOffset\0", snapshot.method_access_flags_offset);
     sl!(
         b"directMethodHandleMemberOffset\0",
         snapshot.direct_method_handle_member_offset
@@ -805,6 +970,7 @@ unsafe fn populate_instance(
     si!(b"fieldSlots\0", snapshot.field_slots);
     si!(b"addressSize\0", snapshot.address_size);
     sb!(b"valid\0", error_length == 0);
+    log::info("createJVM: populate scalar fields finished");
     let error_string = if error_length == 0 {
         ptr::null_mut()
     } else {
@@ -823,6 +989,7 @@ unsafe fn populate_instance(
     if !error_string.is_null() {
         delete_local_reference(environment, error_string);
     }
+    log::info("createJVM: populate finished");
     Ok(())
 }
 
@@ -1027,6 +1194,7 @@ unsafe fn set_long_field(
         return Err(b"Could not populate a JVM long field\0");
     }
     ((*(*environment)).v1_1.SetLongField)(environment, object, field, value);
+    log::info(format_args!("createJVM: set long {}", core::str::from_utf8(&name[..name.len().saturating_sub(1)]).unwrap_or("unknown")));
     Ok(())
 }
 unsafe fn set_int_field(
@@ -1042,6 +1210,7 @@ unsafe fn set_int_field(
         return Err(b"Could not populate a JVM integer field\0");
     }
     ((*(*environment)).v1_1.SetIntField)(environment, object, field, value);
+    log::info(format_args!("createJVM: set int {}", core::str::from_utf8(&name[..name.len().saturating_sub(1)]).unwrap_or("unknown")));
     Ok(())
 }
 unsafe fn set_boolean_field(
@@ -1057,6 +1226,7 @@ unsafe fn set_boolean_field(
         return Err(b"Could not populate a JVM boolean field\0");
     }
     ((*(*environment)).v1_1.SetBooleanField)(environment, object, field, value);
+    log::info(format_args!("createJVM: set boolean {}", core::str::from_utf8(&name[..name.len().saturating_sub(1)]).unwrap_or("unknown")));
     Ok(())
 }
 unsafe fn jvalue_object(value: jobject) -> jvalue {
@@ -2661,3 +2831,4 @@ mod tests {
         assert!(encoding.compressed);
     }
 }
+

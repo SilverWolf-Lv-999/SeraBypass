@@ -2,6 +2,7 @@ package io.github.seraphina.utility.hook;
 
 import io.github.seraphina.jnct.api.JVM;
 import io.github.seraphina.utility.UnsafeUtility;
+import io.github.seraphina.utility.hook.member.InstanceMemberManager;
 import io.github.seraphina.utility.win.NativeMemoryUtility;
 
 import java.io.ByteArrayOutputStream;
@@ -21,7 +22,6 @@ public class SeraLegitHook {
     private static long RESOLVED_METHOD_NAME_VMTARGET_OFFSET;
     private static long METHOD_CONST_METHOD_OFFSET;
     private static long METHOD_VTABLE_INDEX_OFFSET;
-    private static int METHOD_NONVIRTUAL_VTABLE_INDEX;
     private static long CONST_METHOD_CONSTANTS_OFFSET;
     private static long CONST_METHOD_CODE_SIZE_OFFSET;
     private static long CONST_METHOD_NAME_INDEX_OFFSET;
@@ -201,7 +201,7 @@ public class SeraLegitHook {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(methodName, "methodName");
         Objects.requireNonNull(methodBody, "methodBody");
-        addMethod(klass, methodName, methodBody, null, true);
+        addStaticMethod(klass, methodName, methodBody);
     }
 
     public static void addInstanceMethod(
@@ -209,15 +209,11 @@ public class SeraLegitHook {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(methodName, "methodName");
         Objects.requireNonNull(methodBody, "methodBody");
-        addMethod(klass, methodName, null, methodBody, false);
+        InstanceMemberManager.addInstanceMethod(klass, methodName, methodBody);
     }
 
-    private static void addMethod(
-            Class<?> klass,
-            String methodName,
-            Runnable staticBody,
-            Consumer<Object> instanceBody,
-            boolean staticMethod) {
+    private static void addStaticMethod(
+            Class<?> klass, String methodName, Runnable methodBody) {
 
         synchronized (SeraLegitHook.class) {
             initialize();
@@ -247,19 +243,10 @@ public class SeraLegitHook {
             boolean installed = false;
 
             try {
-                if (staticMethod) {
-                    INJECTED_METHOD_BODIES.put(callbackId, NO_OP);
-                } else {
-                    INJECTED_INSTANCE_METHOD_BODIES.put(callbackId, NO_OP_INSTANCE);
-                }
-                Class<?> donorClass = staticMethod
-                        ? createDonorClass(callbackId, methodName)
-                        : createInstanceDonorClass(callbackId, methodName);
+                INJECTED_METHOD_BODIES.put(callbackId, NO_OP);
+                Class<?> donorClass = createDonorClass(callbackId, methodName);
                 Method donorMethod = donorClass.getDeclaredMethod(methodName);
-                Object donor = staticMethod
-                        ? null
-                        : donorClass.getDeclaredConstructor().newInstance();
-                donorMethod.invoke(donor);
+                donorMethod.invoke(null);
 
                 MethodLocation donorLocation = locate(donorMethod);
                 verifyMethodName(donorLocation, methodName);
@@ -280,11 +267,6 @@ public class SeraLegitHook {
                 UnsafeUtility.UNSAFE.putShort(
                         donorLocation.constMethodAddress + CONST_METHOD_ORIGINAL_METHOD_IDNUM_OFFSET,
                         (short) methodId);
-                if (!staticMethod) {
-                    UnsafeUtility.UNSAFE.putInt(
-                            donorLocation.methodAddress + METHOD_VTABLE_INDEX_OFFSET,
-                            METHOD_NONVIRTUAL_VTABLE_INDEX);
-                }
                 UnsafeUtility.UNSAFE.putLongVolatile(null, poolHolderAddress, targetKlassAddress);
 
                 replacementMethodsAddress = expandedMethodArray(
@@ -295,15 +277,11 @@ public class SeraLegitHook {
                 clearReflectionData(klass);
 
                 Method injectedMethod = klass.getDeclaredMethod(methodName);
-                verifyInjectedMethod(klass, injectedMethod, staticMethod);
+                verifyInjectedMethod(klass, injectedMethod, true);
 
                 INJECTED_METHODS.put(
                         callbackId, new InjectedMethod(donorClass, replacementMethodsAddress));
-                if (staticMethod) {
-                    INJECTED_METHOD_BODIES.put(callbackId, staticBody);
-                } else {
-                    INJECTED_INSTANCE_METHOD_BODIES.put(callbackId, instanceBody);
-                }
+                INJECTED_METHOD_BODIES.put(callbackId, methodBody);
             } catch (Throwable throwable) {
                 if (installed) {
                     UnsafeUtility.UNSAFE.putLongVolatile(
@@ -317,11 +295,7 @@ public class SeraLegitHook {
                     UnsafeUtility.UNSAFE.freeMemory(replacementMethodsAddress);
                 }
                 clearReflectionData(klass);
-                if (staticMethod) {
-                    INJECTED_METHOD_BODIES.remove(callbackId);
-                } else {
-                    INJECTED_INSTANCE_METHOD_BODIES.remove(callbackId);
-                }
+                INJECTED_METHOD_BODIES.remove(callbackId);
                 throw addMethodFailure(klass, methodName, throwable);
             }
         }
@@ -333,7 +307,6 @@ public class SeraLegitHook {
         Objects.requireNonNull(parameterTypes, "parameterTypes");
 
         synchronized (SeraLegitHook.class) {
-            initialize();
             Method targetMethod;
             try {
                 targetMethod = klass.getDeclaredMethod(methodName, parameterTypes);
@@ -347,6 +320,11 @@ public class SeraLegitHook {
                 throw new IllegalArgumentException(
                         "Only concrete methods can be removed: " + targetMethod);
             }
+            if (!Modifier.isStatic(targetMethod.getModifiers())) {
+                InstanceMemberManager.removeMethod(klass, methodName, parameterTypes);
+                return;
+            }
+            initialize();
 
             MethodLocation targetLocation;
             try {
@@ -425,23 +403,22 @@ public class SeraLegitHook {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(fieldName, "fieldName");
         Objects.requireNonNull(backingFieldName, "backingFieldName");
-        addField(klass, fieldName, backingFieldName, modifiers, true);
+        addStaticFieldInternal(klass, fieldName, backingFieldName, modifiers);
     }
 
     public static void addInstanceField(
-            Class<?> klass, String fieldName, String backingFieldName, int modifiers) {
+            Class<?> klass, String fieldName, Class<?> type, int modifiers) {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(fieldName, "fieldName");
-        Objects.requireNonNull(backingFieldName, "backingFieldName");
-        addField(klass, fieldName, backingFieldName, modifiers, false);
+        Objects.requireNonNull(type, "type");
+        InstanceMemberManager.addInstanceField(klass, fieldName, type, modifiers);
     }
 
-    private static void addField(
+    private static void addStaticFieldInternal(
             Class<?> klass,
             String fieldName,
             String backingFieldName,
-            int modifiers,
-            boolean staticField) {
+            int modifiers) {
 
         synchronized (SeraLegitHook.class) {
             initialize();
@@ -450,9 +427,8 @@ public class SeraLegitHook {
                         "Field name must be an ASCII Java identifier: " + fieldName);
             }
             validateFieldModifiers(modifiers);
-            if (Modifier.isStatic(modifiers) != staticField) {
-                throw new IllegalArgumentException(
-                        "An added live field must be " + (staticField ? "static" : "non-static"));
+            if (!Modifier.isStatic(modifiers)) {
+                throw new IllegalArgumentException("An added live field must be static");
             }
             try {
                 klass.getDeclaredField(fieldName);
@@ -463,10 +439,9 @@ public class SeraLegitHook {
             }
 
             Field backingField = requireDeclaredField(klass, backingFieldName);
-            if (Modifier.isStatic(backingField.getModifiers()) != staticField) {
+            if (!Modifier.isStatic(backingField.getModifiers())) {
                 throw new IllegalArgumentException(
-                        "The backing field must be "
-                                + (staticField ? "static" : "non-static") + ": " + backingField);
+                        "The backing field must be static: " + backingField);
             }
 
             long originalFieldsAddress = fieldArrayAddress(klass);
@@ -490,11 +465,15 @@ public class SeraLegitHook {
     public static void removeField(Class<?> klass, String fieldName) {
         Objects.requireNonNull(klass, "klass");
         Objects.requireNonNull(fieldName, "fieldName");
+        Field targetField = requireDeclaredField(klass, fieldName);
+        if (!Modifier.isStatic(targetField.getModifiers())) {
+            InstanceMemberManager.removeField(klass, fieldName);
+            return;
+        }
 
         synchronized (SeraLegitHook.class) {
             initialize();
             ensureClassInitialized(klass);
-            Field targetField = requireDeclaredField(klass, fieldName);
             long originalFieldsAddress = fieldArrayAddress(klass);
             int targetFieldIndex = findFieldIndex(klass, originalFieldsAddress, targetField);
             long replacementFieldsAddress = compactFieldArray(
@@ -1880,7 +1859,6 @@ public class SeraLegitHook {
                 RESOLVED_METHOD_NAME_VMTARGET_OFFSET = jvmLayout.resolvedMethodNameVmtargetOffset;
                 METHOD_CONST_METHOD_OFFSET = jvmLayout.methodConstMethodOffset;
                 METHOD_VTABLE_INDEX_OFFSET = jvmLayout.methodVtableIndexOffset;
-                METHOD_NONVIRTUAL_VTABLE_INDEX = jvmLayout.methodNonvirtualVtableIndex;
                 CONST_METHOD_CONSTANTS_OFFSET = jvmLayout.constMethodConstantsOffset;
                 CONST_METHOD_CODE_SIZE_OFFSET = jvmLayout.constMethodCodeSizeOffset;
                 CONST_METHOD_NAME_INDEX_OFFSET = jvmLayout.constMethodNameIndexOffset;

@@ -5,10 +5,12 @@
 #[cfg(test)]
 extern crate alloc;
 
+mod deoptimize;
 mod jvm;
 mod klass;
 pub mod log;
 mod peer_jvmti;
+mod vm_structs;
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
@@ -40,6 +42,7 @@ const HELLO_COMMAND: &[u8] = b"hello";
 const DEFINE_HIDDEN_CLASS_COMMAND: &[u8] = b"defineHiddenClass";
 const PEER_JVMTI_COMMAND: &[u8] = b"peerJvmTI";
 const CREATE_JVM_COMMAND: &[u8] = b"createJVM";
+const DEOPTIMIZE_CLASSES_COMMAND: &[u8] = b"deoptimizeClasses";
 const HELLO_RESULT: &[u8] = b"Hello\0";
 const UNKNOWN_COMMAND_RESULT: &[u8] = b"Unknown JNCT command\0";
 const PEER_JVMTI_INITIALIZED_RESULT: &[u8] = b"peerJvmTI initialized\0";
@@ -180,7 +183,7 @@ unsafe fn process_jnct_command(environment: *mut JNIEnv, fields: &JnctFields) {
 unsafe fn dispatch_jnct_command(
     environment: *mut JNIEnv,
     command: jstring,
-    _arguments: jobject,
+    arguments: jobject,
 ) -> jobject {
     let command_characters =
         ((*(*environment)).v1_1.GetStringUTFChars)(environment, command, ptr::null_mut());
@@ -196,10 +199,15 @@ unsafe fn dispatch_jnct_command(
     let is_define_hidden_class = command_bytes == DEFINE_HIDDEN_CLASS_COMMAND;
     let is_peer_jvmti = command_bytes == PEER_JVMTI_COMMAND;
     let is_create_jvm = command_bytes == CREATE_JVM_COMMAND;
+    let is_deoptimize_classes = command_bytes == DEOPTIMIZE_CLASSES_COMMAND;
     ((*(*environment)).v1_1.ReleaseStringUTFChars)(environment, command, command_characters);
 
     if is_create_jvm {
-        return jvm::create_instance(environment, _arguments);
+        return jvm::create_instance(environment, arguments);
+    }
+
+    if is_deoptimize_classes {
+        return deoptimize::deoptimize_classes(environment, arguments);
     }
 
     if is_hello {
@@ -209,7 +217,7 @@ unsafe fn dispatch_jnct_command(
     }
 
     if is_define_hidden_class {
-        return klass::define_hidden_class_instance(environment, _arguments);
+        return klass::define_hidden_class_instance(environment, arguments);
     }
 
     if is_peer_jvmti {
@@ -374,3 +382,4 @@ unsafe fn get_current_environment() -> Option<*mut JNIEnv> {
 extern "system" fn native_say_hello(_: *mut c_void, _: *mut c_void) {
     printf!("hello");
 }
+
