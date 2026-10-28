@@ -15,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import sun.misc.Unsafe;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public class SeraLegitHook {
@@ -210,6 +212,21 @@ public class SeraLegitHook {
         Objects.requireNonNull(methodName, "methodName");
         Objects.requireNonNull(methodBody, "methodBody");
         InstanceMemberManager.addInstanceMethod(klass, methodName, methodBody);
+    }
+
+    public static void addInstanceMethod(
+            Class<?> klass,
+            String methodName,
+            Class<?> returnType,
+            Class<?>[] parameterTypes,
+            BiFunction<Object, Object[], Object> methodBody) {
+        Objects.requireNonNull(klass, "klass");
+        Objects.requireNonNull(methodName, "methodName");
+        Objects.requireNonNull(returnType, "returnType");
+        Objects.requireNonNull(parameterTypes, "parameterTypes");
+        Objects.requireNonNull(methodBody, "methodBody");
+        InstanceMemberManager.addInstanceMethod(
+                klass, methodName, returnType, parameterTypes, methodBody);
     }
 
     private static void addStaticMethod(
@@ -809,6 +826,8 @@ public class SeraLegitHook {
         try {
             return findConstantPoolUtf8Index(klass, value);
         } catch (IllegalArgumentException missingEntry) {
+            JVM jvmLayout = JVM.getInstance();
+            Unsafe unsafe = UnsafeUtility.UNSAFE;
             long donorId = NEXT_INJECTED_METHOD_ID.incrementAndGet();
             String donorName = SeraLegitHook.class.getPackageName()
                     + ".ConstantPoolUtf8Donor" + donorId;
@@ -843,6 +862,19 @@ public class SeraLegitHook {
                     klassAddress + KLASS_CONSTANTS_OFFSET);
             if (!looksLikeNativePointer(originalPoolAddress)) {
                 throw new IllegalStateException("The target class has no ConstantPool");
+            }
+            long cacheAddress = unsafe.getLong(
+                    originalPoolAddress + jvmLayout.constantPoolCacheOffset);
+            if (cacheAddress != 0L) {
+                if (!looksLikeNativePointer(cacheAddress)) {
+                    throw new IllegalStateException("The target ConstantPool has an invalid cache");
+                }
+                long cachedPoolAddress = unsafe.getLong(
+                        cacheAddress + jvmLayout.constantPoolCacheConstantPoolOffset);
+                if (cachedPoolAddress != originalPoolAddress) {
+                    throw new IllegalStateException(
+                            "The target ConstantPoolCache does not reference its ConstantPool");
+                }
             }
             int originalLength = constantPoolLength(originalPoolAddress);
             if (originalLength >= 0xFFFF) {
@@ -903,6 +935,9 @@ public class SeraLegitHook {
                 UnsafeUtility.UNSAFE.putLong(
                         replacementPoolAddress + CONSTANT_POOL_TAGS_OFFSET,
                         replacementTagsAddress);
+                unsafe.putLong(
+                        replacementPoolAddress + jvmLayout.constantPoolCacheOffset,
+                        cacheAddress);
                 UnsafeUtility.UNSAFE.putLong(
                         replacementPoolAddress + CONSTANT_POOL_ENTRIES_OFFSET
                                 + (long) originalLength * Long.BYTES,
@@ -920,6 +955,12 @@ public class SeraLegitHook {
                 }
                 UnsafeUtility.UNSAFE.putLongVolatile(
                         null, klassAddress + KLASS_CONSTANTS_OFFSET, replacementPoolAddress);
+                if (cacheAddress != 0L) {
+                    unsafe.putLongVolatile(
+                            null,
+                            cacheAddress + jvmLayout.constantPoolCacheConstantPoolOffset,
+                            replacementPoolAddress);
+                }
                 clearReflectionData(klass);
                 return originalLength;
             } catch (RuntimeException | Error exception) {

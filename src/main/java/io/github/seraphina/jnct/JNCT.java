@@ -11,8 +11,8 @@ public class JNCT {
     protected static volatile Object result;
 
     public static synchronized Object ivk(String command, Object... arg) {
-        cmd = command;
         args = arg;
+        cmd = command;
         while (result == null) {
             try {
                 Thread.onSpinWait();

@@ -54,7 +54,6 @@ final class InstanceKlassSwapper {
     static Change swap(List<Class<?>> hierarchy, Map<Class<?>, byte[]> classFiles) {
         JVM jvm = JVM.getInstance();
         Unsafe unsafe = UnsafeUtility.UNSAFE;
-        System.out.println("instanceMembers: swap records start");
         List<SwapRecord> records = new ArrayList<>(hierarchy.size());
         for (Class<?> target : hierarchy) {
             byte[] bytes = classFiles.get(target);
@@ -83,41 +82,24 @@ final class InstanceKlassSwapper {
                     originalSuper,
                     classLoaderData,
                     dictionaryLiteral,
+                    unsafe.getLong(oldKlass + jvm.klassJavaMirrorOffset),
                     captureStaticValues(target)));
         }
-        System.out.println("instanceMembers: swap records captured");
         List<HierarchySnapshot> hierarchySnapshots = captureHierarchyChains(records, jvm);
         List<ClassLoaderSnapshot> classLoaderSnapshots =
                 captureClassLoaderChains(records, jvm);
-        System.out.println("instanceMembers: swap chains captured");
         Change change = new Change(records, hierarchySnapshots, classLoaderSnapshots);
         Map<Long, Long> replacements = new HashMap<>();
         try {
             for (SwapRecord record : records) {
-                Long replacementSuper = replacements.get(record.originalSuper);
-                if (replacementSuper != null) {
-                    unsafe.putLongVolatile(
-                            null, record.oldKlass + jvm.klassSuperOffset, replacementSuper);
-                }
-                Class<?> replacement;
-                try {
-                    MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(
-                            record.target, UnsafeUtility.TRUSTED_LOOKUP);
-                    System.out.println("instanceMembers: defining " + record.target.getName());
-                    replacement = lookup.defineHiddenClass(
-                                    record.classFile,
-                                    false,
-                                    MethodHandles.Lookup.ClassOption.NESTMATE,
-                                    MethodHandles.Lookup.ClassOption.STRONG)
-                            .lookupClass();
-                } finally {
-                    if (replacementSuper != null) {
-                        unsafe.putLongVolatile(
-                                null,
-                                record.oldKlass + jvm.klassSuperOffset,
-                                record.originalSuper);
-                    }
-                }
+                MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(
+                        record.target, UnsafeUtility.TRUSTED_LOOKUP);
+                Class<?> replacement = lookup.defineHiddenClass(
+                                record.classFile,
+                                false,
+                                MethodHandles.Lookup.ClassOption.NESTMATE,
+                                MethodHandles.Lookup.ClassOption.STRONG)
+                        .lookupClass();
                 long replacementKlass = unsafe.getLong(replacement, jvm.classKlassOffset);
                 if (replacementKlass == 0L) {
                     throw new IllegalStateException(
@@ -125,6 +107,8 @@ final class InstanceKlassSwapper {
                 }
                 record.replacement = replacement;
                 record.replacementKlass = replacementKlass;
+                record.replacementMirrorHandle = unsafe.getLong(
+                        replacementKlass + jvm.klassJavaMirrorOffset);
                 replacements.put(record.oldKlass, replacementKlass);
                 long replacementClassLoader =
                         unsafe.getLong(replacementKlass + jvm.klassClassLoaderDataOffset);
@@ -132,27 +116,33 @@ final class InstanceKlassSwapper {
                     throw new IllegalStateException(
                             "Replacement class did not retain ClassLoaderData: " + record.target.getName());
                 }
-                unsafe.putLong(
-                        replacementKlass + jvm.klassNameOffset,
-                        unsafe.getLong(record.oldKlass + jvm.klassNameOffset));
+                long oldName = unsafe.getLong(record.oldKlass + jvm.klassNameOffset);
+                long replacementName = unsafe.getLong(replacementKlass + jvm.klassNameOffset);
+                record.oldName = oldName;
+                record.replacementName = replacementName;
+                unsafe.putLong(record.oldKlass + jvm.klassNameOffset, replacementName);
+                unsafe.putLong(replacementKlass + jvm.klassNameOffset, oldName);
                 unsafe.putLongVolatile(null, record.dictionaryLiteral, replacementKlass);
-                System.out.println("instanceMembers: defined " + record.target.getName());
             }
             for (SwapRecord record : records) {
                 Class<?> replacement = record.replacement;
                 long replacementKlass = record.replacementKlass;
-                System.out.println("instanceMembers: static values " + record.target.getName());
                 applyStaticValues(record.target, replacement, record.staticValues);
-                long mirrorHandle = unsafe.getLong(record.oldKlass + jvm.klassJavaMirrorOffset);
-                long name = unsafe.getLong(record.oldKlass + jvm.klassNameOffset);
+                long mirrorHandle = record.mirrorHandle;
+                long replacementMirrorHandle = record.replacementMirrorHandle;
+                long name = record.oldName;
                 int accessFlags = unsafe.getInt(record.oldKlass + jvm.klassAccessFlagsOffset);
                 byte initState = unsafe.getByte(
                         record.oldKlass + jvm.instanceKlassInitStateOffset);
-                if (mirrorHandle == 0L || name == 0L) {
+                if (mirrorHandle == 0L || replacementMirrorHandle == 0L || name == 0L
+                        || mirrorHandle == replacementMirrorHandle
+                        || unsafe.getLong(record.target, jvm.classKlassOffset) != record.oldKlass
+                        || unsafe.getLong(replacement, jvm.classKlassOffset) != replacementKlass) {
                     throw new IllegalStateException(
                             "Incomplete HotSpot class metadata for " + record.target.getName());
                 }
                 unsafe.putLong(replacementKlass + jvm.klassJavaMirrorOffset, mirrorHandle);
+                unsafe.putLong(record.oldKlass + jvm.klassJavaMirrorOffset, replacementMirrorHandle);
                 unsafe.putLong(replacementKlass + jvm.klassNameOffset, name);
                 unsafe.putLong(
                         replacementKlass + jvm.klassClassLoaderDataOffset, record.classLoaderData);
@@ -171,16 +161,15 @@ final class InstanceKlassSwapper {
                 unsafe.putInt(replacementKlass + jvm.klassAccessFlagsOffset, accessFlags);
                 unsafe.putByte(
                         replacementKlass + jvm.instanceKlassInitStateOffset, initState);
-                System.out.println("instanceMembers: metadata merge " + record.target.getName());
                 clearReflectionData(record.target, jvm);
+                clearReflectionData(replacement, jvm);
+                unsafe.putLongVolatile(replacement, jvm.classKlassOffset, record.oldKlass);
                 unsafe.putLongVolatile(
                         null, record.dictionaryLiteral, replacementKlass);
                 unsafe.putLongVolatile(
                         record.target, jvm.classKlassOffset, replacementKlass);
             }
-            System.out.println("instanceMembers: rebuilding hierarchy");
             rebuildHierarchy(change, replacements, jvm);
-            System.out.println("instanceMembers: rebuilding loader chain");
             rebuildClassLoaderData(change, replacements, jvm);
             for (SwapRecord record : records) {
                 clearReflectionData(record.target, jvm);
@@ -215,8 +204,22 @@ final class InstanceKlassSwapper {
         for (int index = change.records.size() - 1; index >= 0; index--) {
             SwapRecord record = change.records.get(index);
             clearReflectionData(record.target, jvm);
+            if (record.replacement != null && record.replacementKlass != 0L) {
+                unsafe.putLong(record.oldKlass + jvm.klassJavaMirrorOffset, record.mirrorHandle);
+                if (record.replacementMirrorHandle != 0L) {
+                    unsafe.putLong(
+                            record.replacementKlass + jvm.klassJavaMirrorOffset,
+                            record.replacementMirrorHandle);
+                }
+                unsafe.putLongVolatile(
+                        record.replacement, jvm.classKlassOffset, record.replacementKlass);
+            }
             unsafe.putLongVolatile(record.target, jvm.classKlassOffset, record.oldKlass);
             unsafe.putLongVolatile(null, record.dictionaryLiteral, record.oldKlass);
+            if (record.oldName != 0L) {
+                unsafe.putLong(record.oldKlass + jvm.klassNameOffset, record.oldName);
+                unsafe.putLong(record.replacementKlass + jvm.klassNameOffset, record.replacementName);
+            }
         }
         for (SwapRecord record : change.records) {
             clearReflectionData(record.target, jvm);
@@ -302,7 +305,13 @@ final class InstanceKlassSwapper {
         for (ClassLoaderSnapshot snapshot : change.classLoaderSnapshots) {
             List<Long> desired = new ArrayList<>(snapshot.klasses.size());
             for (long klass : snapshot.klasses) {
-                desired.add(replacements.getOrDefault(klass, klass));
+                Long replacement = replacements.get(klass);
+                if (replacement == null) {
+                    desired.add(klass);
+                } else {
+                    desired.add(replacement);
+                    desired.add(klass);
+                }
             }
             UnsafeUtility.UNSAFE.putLongVolatile(
                     null,
@@ -361,7 +370,8 @@ final class InstanceKlassSwapper {
             }
             Object base = unsafe.staticFieldBase(field);
             long offset = unsafe.staticFieldOffset(field);
-            values.add(new StaticValue(field.getName(), readStatic(unsafe, field, base, offset)));
+            Object value = readStatic(unsafe, field, base, offset);
+            values.add(new StaticValue(field.getName(), value));
         }
         return values;
     }
@@ -372,14 +382,42 @@ final class InstanceKlassSwapper {
         for (StaticValue value : values) {
             try {
                 Field targetField = target.getDeclaredField(value.name);
-                replacement.getDeclaredField(value.name);
-                long offset = unsafe.staticFieldOffset(targetField);
-                writeStatic(unsafe, targetField, target, offset, value.value);
+                Field replacementField = replacement.getDeclaredField(value.name);
+                long offset = staticFieldOffset(replacement, replacementField, JVM.getInstance());
+                writeStatic(unsafe, targetField, target, unsafe.staticFieldOffset(targetField), value.value);
+                writeStatic(unsafe, replacementField, replacement, offset, value.value);
             } catch (NoSuchFieldException exception) {
                 throw new IllegalStateException(
                         "Replacement class lost static field " + value.name, exception);
             }
         }
+    }
+
+    private static long staticFieldOffset(Class<?> klass, Field targetField, JVM jvm) {
+        Unsafe unsafe = UnsafeUtility.UNSAFE;
+        long klassPointer = unsafe.getLong(klass, jvm.classKlassOffset);
+        long fields = unsafe.getLong(klassPointer + jvm.fieldsOffset);
+        int fieldSlots = unsafe.getInt(fields + jvm.metadataArrayLengthOffset);
+        Field[] declaredFields = klass.getDeclaredFields();
+        if (fieldSlots != declaredFields.length * jvm.fieldSlots) {
+            throw new IllegalStateException("Field metadata does not match " + klass.getName());
+        }
+        long elements = fields + jvm.metadataU2ArrayElementsOffset;
+        for (int index = 0; index < declaredFields.length; index++) {
+            Field field = declaredFields[index];
+            if (!field.getName().equals(targetField.getName())
+                    || field.getType() != targetField.getType()
+                    || !Modifier.isStatic(field.getModifiers())) {
+                continue;
+            }
+            long fieldInfo = elements + (long) index * jvm.fieldSlots * Short.BYTES;
+            int packedOffset = Short.toUnsignedInt(unsafe.getShort(
+                    fieldInfo + (long) jvm.fieldLowPackedOffset * Short.BYTES))
+                    | Short.toUnsignedInt(unsafe.getShort(
+                    fieldInfo + (long) jvm.fieldHighPackedOffset * Short.BYTES)) << Short.SIZE;
+            return packedOffset >>> 2;
+        }
+        throw new IllegalStateException("Could not find static field metadata for " + targetField);
     }
 
     private static Object readStatic(Unsafe unsafe, Field field, Object base, long offset) {
@@ -516,9 +554,13 @@ final class InstanceKlassSwapper {
         private final long originalSuper;
         private final long classLoaderData;
         private final long dictionaryLiteral;
+        private final long mirrorHandle;
         private final List<StaticValue> staticValues;
+        private long oldName;
+        private long replacementName;
         private Class<?> replacement;
         private long replacementKlass;
+        private long replacementMirrorHandle;
 
         private SwapRecord(
                 Class<?> target,
@@ -527,6 +569,7 @@ final class InstanceKlassSwapper {
                 long originalSuper,
                 long classLoaderData,
                 long dictionaryLiteral,
+                long mirrorHandle,
                 List<StaticValue> staticValues) {
             this.target = target;
             this.classFile = classFile;
@@ -534,6 +577,7 @@ final class InstanceKlassSwapper {
             this.originalSuper = originalSuper;
             this.classLoaderData = classLoaderData;
             this.dictionaryLiteral = dictionaryLiteral;
+            this.mirrorHandle = mirrorHandle;
             this.staticValues = staticValues;
         }
     }

@@ -48,15 +48,15 @@ public class Start {
         Native.main(args);
         {
             Agent.reg(new TestSeraTrans());
-            Agent.reg(new TransSystem());
+//            Agent.reg(new TransSystem());
         }
         Agent.start(args);
         TransTarget.class.getName();
-        {
-            Agent.transform(TransTarget.class);
-            Agent.transform(System.class);
-            Agent.transform(Object.class);
-        }
+//        {
+//            Agent.transform(TransTarget.class);
+//            Agent.transform(System.class);
+//            Agent.transform(Object.class);
+//        }
         System.out.println(a());
         SeraLegitHook.hookMethod(Start.class, "a", 0);
         System.out.println(a());

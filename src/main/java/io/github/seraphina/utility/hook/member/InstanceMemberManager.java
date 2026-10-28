@@ -19,12 +19,13 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 public final class InstanceMemberManager {
     private static final Object LOCK = new Object();
     private static final Map<Class<?>, byte[]> CLASS_FILES = new HashMap<>();
-    private static final Map<String, Consumer<Object>> CALLBACKS = new ConcurrentHashMap<>();
+    private static final Map<String, BiFunction<Object, Object[], Object>> CALLBACKS = new ConcurrentHashMap<>();
     private static final Map<Class<?>, Map<String, String>> CALLBACK_IDS = new HashMap<>();
     private static final AtomicLong NEXT_CALLBACK_ID = new AtomicLong();
 
@@ -78,29 +79,60 @@ public final class InstanceMemberManager {
 
     public static void addInstanceMethod(
             Class<?> target, String name, Consumer<Object> body) {
+        Objects.requireNonNull(body, "body");
+        addInstanceMethod(target, name, void.class, new Class<?>[0], (receiver, arguments) -> {
+            body.accept(receiver);
+            return null;
+        });
+    }
+
+    public static void addInstanceMethod(
+            Class<?> target,
+            String name,
+            Class<?> returnType,
+            Class<?>[] parameterTypes,
+            BiFunction<Object, Object[], Object> body) {
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(returnType, "returnType");
+        Objects.requireNonNull(parameterTypes, "parameterTypes");
         Objects.requireNonNull(body, "body");
         validateConcreteClass(target);
         validateIdentifier(name);
+        int parameterSlots = 1;
+        for (Class<?> parameterType : parameterTypes) {
+            Objects.requireNonNull(parameterType, "parameterType");
+            if (parameterType == void.class) {
+                throw new IllegalArgumentException("A method parameter cannot be void");
+            }
+            parameterSlots += parameterType == long.class || parameterType == double.class ? 2 : 1;
+        }
+        if (parameterSlots > 255) {
+            throw new IllegalArgumentException("An instance method cannot use more than 255 argument slots");
+        }
         synchronized (LOCK) {
             ensureClassInitialized(target);
-            if (declaredMethod(target, name) != null) {
-                throw new IllegalArgumentException(target.getName() + " already declares method " + name);
+            if (declaredMethod(target, name, parameterTypes) != null) {
+                throw new IllegalArgumentException(
+                        target.getName() + " already declares method " + name
+                                + InstanceClassFileEditor.methodDescriptor(returnType, parameterTypes));
             }
+            String descriptor = InstanceClassFileEditor.methodDescriptor(returnType, parameterTypes);
             String callbackId = Long.toUnsignedString(NEXT_CALLBACK_ID.incrementAndGet(), Character.MAX_RADIX);
             CALLBACKS.put(callbackId, body);
             try {
                 byte[] previous = currentBytes(target);
-                byte[] replacement = InstanceClassFileEditor.addInstanceVoidMethod(previous, name, callbackId);
+                byte[] replacement = InstanceClassFileEditor.addInstanceMethod(
+                        previous, name, returnType, parameterTypes, callbackId);
                 install(target, replacement, () -> {
-                    Method method = requireDeclaredMethod(target, name);
-                    if (Modifier.isStatic(method.getModifiers())) {
-                        throw new IllegalStateException("The added method is static: " + method);
+                    Method method = requireDeclaredMethod(target, name, parameterTypes);
+                    if (Modifier.isStatic(method.getModifiers())
+                            || method.getReturnType() != returnType) {
+                        throw new IllegalStateException("The added method has incorrect metadata: " + method);
                     }
                 });
                 CALLBACK_IDS.computeIfAbsent(target, ignored -> new HashMap<>())
-                        .put(name + "()V", callbackId);
+                        .put(name + descriptor, callbackId);
             } catch (Throwable throwable) {
                 CALLBACKS.remove(callbackId);
                 throw throwable;
@@ -141,34 +173,30 @@ public final class InstanceMemberManager {
         }
     }
 
-    public static void runInjectedInstance(String callbackId, Object receiver) {
-        Consumer<Object> body = CALLBACKS.get(callbackId);
+    public static Object invokeInjectedInstance(
+            String callbackId, Object receiver, Object[] arguments) {
+        BiFunction<Object, Object[], Object> body = CALLBACKS.get(callbackId);
         if (body == null) {
             throw new IllegalStateException("No injected instance method body registered for " + callbackId);
         }
-        body.accept(receiver);
+        return body.apply(receiver, arguments);
     }
 
     private static void install(Class<?> target, byte[] replacement, Runnable verification) {
         Map<Class<?>, byte[]> originalFiles = new HashMap<>(CLASS_FILES);
         InstanceKlassSwapper.Change change = null;
         try {
-            CLASS_FILES.put(target, replacement);
             List<Class<?>> hierarchy = InstanceKlassSwapper.captureHierarchy(target);
-            System.out.println("instanceMembers: hierarchy captured " + hierarchy);
             Map<Class<?>, byte[]> classFiles = new HashMap<>();
             for (Class<?> type : hierarchy) {
-                classFiles.put(type, type == target ? replacement : currentBytes(type));
+                classFiles.put(type, currentBytes(type));
             }
-            System.out.println("instanceMembers: deoptimize start");
-            deoptimize(hierarchy);
-            System.out.println("instanceMembers: deoptimize finished");
+            deoptimize(hierarchy, classFiles);
+            CLASS_FILES.put(target, replacement);
+            classFiles.put(target, replacement);
             change = InstanceKlassSwapper.swap(hierarchy, classFiles);
-            System.out.println("instanceMembers: swap finished");
             verification.run();
-            System.out.println("instanceMembers: verification finished");
             InstanceKlassSwapper.commit(change);
-            System.out.println("instanceMembers: commit finished");
         } catch (Throwable throwable) {
             if (change != null) {
                 InstanceKlassSwapper.rollback(change);
@@ -179,9 +207,14 @@ public final class InstanceMemberManager {
         }
     }
 
-    private static void deoptimize(List<Class<?>> hierarchy) {
+    private static void deoptimize(List<Class<?>> hierarchy, Map<Class<?>, byte[]> classFiles) {
+        Class<?>[] classes = hierarchy.toArray(new Class<?>[0]);
+        byte[][] bytes = new byte[classes.length][];
+        for (int index = 0; index < classes.length; index++) {
+            bytes[index] = classFiles.get(classes[index]);
+        }
         Object result = JNCT.ivk(
-                "deoptimizeClasses", (Object) hierarchy.toArray(new Class<?>[0]));
+                "deoptimizeClasses", (Object) classes, (Object) bytes);
         if (!"deoptimized".equals(result)) {
             throw new IllegalStateException(
                     "JVMTI could not deoptimize " + hierarchy + ": " + result);
@@ -271,12 +304,14 @@ public final class InstanceMemberManager {
         return field;
     }
 
-    private static Method declaredMethod(Class<?> target, String name) {
-        try {
-            return target.getDeclaredMethod(name);
-        } catch (NoSuchMethodException ignored) {
-            return null;
+    private static Method declaredMethod(Class<?> target, String name, Class<?>... parameterTypes) {
+        for (Method method : target.getDeclaredMethods()) {
+            if (method.getName().equals(name)
+                    && java.util.Arrays.equals(method.getParameterTypes(), parameterTypes)) {
+                return method;
+            }
         }
+        return null;
     }
 
     private static Method requireDeclaredMethod(Class<?> target, String name, Class<?>... parameterTypes) {
@@ -289,9 +324,5 @@ public final class InstanceMemberManager {
         throw new IllegalArgumentException(
                 "No declared method " + name + java.util.Arrays.toString(parameterTypes)
                         + " on " + target.getName());
-    }
-
-    private static Method requireDeclaredMethod(Class<?> target, String name) {
-        return requireDeclaredMethod(target, name, new Class<?>[0]);
     }
 }

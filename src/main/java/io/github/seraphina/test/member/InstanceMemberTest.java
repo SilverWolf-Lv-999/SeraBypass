@@ -17,8 +17,68 @@ public final class InstanceMemberTest {
         System.out.println("instanceMembers: start");
         JVM jvm = JVM.getInstance();
         Unsafe unsafe = UnsafeUtility.UNSAFE;
+        Class<?> constantPoolTarget = ConstantPoolTarget.class;
+        check(ConstantPoolTarget.warm("before") == 6, "constant-pool warmup failed");
+        check(ConstantPoolTarget.resolveAfterExpansion("before") == 2, "invokevirtual warmup failed");
+        ConstantPoolTarget oldConstantPoolInstance = new ConstantPoolTarget();
+        check(oldConstantPoolInstance.existingVirtual() == 6, "old constant-pool instance baseline failed");
+        long constantPoolKlass = unsafe.getLong(
+                constantPoolTarget, jvm.classKlassOffset);
+        long originalConstantPool = unsafe.getLong(
+                constantPoolKlass + jvm.klassConstantsOffset);
+        long constantPoolCache = unsafe.getLong(
+                originalConstantPool + jvm.constantPoolCacheOffset);
+        check(constantPoolCache != 0L, "target ConstantPool has no ConstantPoolCache");
+        check(unsafe.getLong(
+                        constantPoolCache + jvm.constantPoolCacheConstantPoolOffset)
+                        == originalConstantPool,
+                "ConstantPoolCache does not point to the target ConstantPool");
+        int constantPoolCacheLength = unsafe.getInt(
+                constantPoolCache + jvm.constantPoolCacheLengthOffset);
+        SeraLegitHook.addStaticField(
+                constantPoolTarget, "backingAlias", "backing", Modifier.PUBLIC | Modifier.STATIC);
+        long expandedConstantPool = unsafe.getLong(
+                constantPoolKlass + jvm.klassConstantsOffset);
+        long expandedConstantPoolCache = unsafe.getLong(
+                expandedConstantPool + jvm.constantPoolCacheOffset);
+        check(expandedConstantPool != originalConstantPool,
+                "constant pool did not expand for the added field name");
+        check(expandedConstantPoolCache == constantPoolCache,
+                "constant pool expansion replaced the ConstantPoolCache");
+        check(unsafe.getLong(
+                        constantPoolCache + jvm.constantPoolCacheConstantPoolOffset)
+                        == expandedConstantPool,
+                "ConstantPoolCache still references the old ConstantPool");
+        check(unsafe.getInt(
+                        constantPoolCache + jvm.constantPoolCacheLengthOffset)
+                        == constantPoolCacheLength,
+                "UTF-8-only constant-pool expansion changed the cache length");
+        check(ConstantPoolTarget.resolveAfterExpansion("before") == 2,
+                "invokevirtual resolution failed after constant-pool expansion");
+        Field backingAlias = constantPoolTarget.getDeclaredField("backingAlias");
+        check(backingAlias.get(null).equals("initial"), "static field alias did not read backing storage");
+        backingAlias.set(null, "updated");
+        check(ConstantPoolTarget.backing.equals("updated"),
+                "static field alias did not write backing storage");
+        SeraLegitHook.removeField(constantPoolTarget, "backingAlias");
+        check(unsafe.getLong(
+                        constantPoolCache + jvm.constantPoolCacheConstantPoolOffset)
+                        == unsafe.getLong(constantPoolKlass + jvm.klassConstantsOffset),
+                "ConstantPoolCache diverged after removing the alias field");
         Class<?> targetClass = MemberTarget.class;
         Class<?> childClass = MemberChild.class;
+        Class<?> resolvedCaller = MemberBytecodeCallerFactory.createExistingMemberCaller(targetClass);
+        Method resolvedReadInt = resolvedCaller.getDeclaredMethod("readExistingInt", targetClass);
+        Method resolvedInvokeBase = resolvedCaller.getDeclaredMethod("invokeBaseValue", targetClass);
+        Object resolvedTarget = new MemberTarget();
+        check((Integer) resolvedReadInt.invoke(null, resolvedTarget) == 11,
+                "preloaded GETFIELD baseline failed");
+        check((Integer) resolvedInvokeBase.invoke(null, resolvedTarget) == 11,
+                "preloaded INVOKEVIRTUAL baseline failed");
+        for (int index = 0; index < 20000; index++) {
+            resolvedReadInt.invoke(null, resolvedTarget);
+            resolvedInvokeBase.invoke(null, resolvedTarget);
+        }
 
         check(jvm.klassVtableLenOffset > 0, "vtable length offset was not resolved");
         check(jvm.instanceKlassNonstaticFieldSizeOffset > 0, "field size offset was not resolved");
@@ -27,8 +87,8 @@ public final class InstanceMemberTest {
         System.out.println("instanceMembers: offsets checked");
         MemberChild childBefore = new MemberChild();
         check(childBefore.baseValue() == 111, "child baseline failed");
-
-        MemberTarget.staticMarker = new String("static-retained");
+        String retainedStaticMarker = new String("static-retained");
+        MemberTarget.staticMarker = retainedStaticMarker;
         Field originalInt = targetClass.getDeclaredField("existingInt");
         Field originalLong = targetClass.getDeclaredField("existingLong");
         long originalIntOffset = unsafe.objectFieldOffset(originalInt);
@@ -60,10 +120,25 @@ public final class InstanceMemberTest {
         int expandedLayoutSize = layoutSize(targetClass);
         check(expandedFieldSize > initialFieldSize, "nonstatic field size did not grow");
         check(expandedLayoutSize > initialLayoutSize, "instance size did not grow");
-        check(MemberTarget.staticMarker == "static-retained", "static field value was not retained");
+        check(MemberTarget.staticMarker == retainedStaticMarker, "static field value was not retained");
 
         System.out.println("instanceMembers: field metadata checked");
-        MemberTarget target = new MemberTarget();
+        Class<?> targetFactory = MemberBytecodeCallerFactory.createInstanceFactory(targetClass);
+        Object target = targetFactory.getDeclaredMethod("instantiate").invoke(null);
+        check((Integer) resolvedReadInt.invoke(null, target) == 11,
+                "preloaded GETFIELD did not follow the replacement Klass");
+        check((Integer) resolvedInvokeBase.invoke(null, target) == 11,
+                "preloaded INVOKEVIRTUAL did not follow the replacement Klass");
+        long allocatedKlass = jvm.compressedKlasses
+                ? jvm.narrowKlassBase
+                        + ((unsafe.getInt(target, jvm.objectKlassOffset) & 0xFFFF_FFFFL)
+                                << jvm.narrowKlassShift)
+                : unsafe.getLong(target, jvm.objectKlassOffset);
+        long currentKlass = unsafe.getLong(targetClass, jvm.classKlassOffset);
+        System.out.println(
+                "instanceMembers: allocated klass=0x" + Long.toHexString(allocatedKlass)
+                        + " current klass=0x" + Long.toHexString(currentKlass));
+        check(allocatedKlass == currentKlass, "new instance retained stale Klass metadata");
         check(originalInt.getInt(target) == 11, "existing int changed after field addition");
         check(originalLong.getLong(target) == 13L, "existing long changed after field addition");
         addedLong.setLong(target, 0x1020304050607080L);
@@ -78,35 +153,61 @@ public final class InstanceMemberTest {
         check(originalInt.getInt(target) == 11, "existing field overlapped added storage");
 
         System.out.println("instanceMembers: field storage checked");
+        Class<?> caller = MemberBytecodeCallerFactory.create(
+                targetClass, "addedPulse", "addedLong", "addedReference");
         callbackCount = 0;
         SeraLegitHook.addInstanceMethod(targetClass, "addedPulse", receiver -> {
-            if (!(receiver instanceof MemberTarget)) {
+            if (!targetClass.isInstance(receiver)) {
                 throw new IllegalStateException("injected method received the wrong receiver");
             }
             callbackCount++;
         });
         System.out.println("instanceMembers: method added");
         Method addedPulse = targetClass.getDeclaredMethod("addedPulse");
+        target = MemberBytecodeCallerFactory.createInstanceFactory(targetClass)
+                .getDeclaredMethod("instantiate").invoke(null);
         int methodVtableLength = vtableLength(targetClass);
         int childMethodVtableLength = vtableLength(childClass);
         check(methodVtableLength > initialVtableLength, "target vtable did not grow");
         check(childMethodVtableLength > initialChildVtableLength, "child vtable did not grow");
         addedPulse.invoke(target);
-        MemberChild child = new MemberChild();
+        Class<?> childFactory = MemberBytecodeCallerFactory.createInstanceFactory(childClass);
+        Object child = childFactory.getDeclaredMethod("instantiate").invoke(null);
         addedPulse.invoke(child);
         check(callbackCount == 2, "reflection did not reach the added virtual method");
 
         System.out.println("instanceMembers: method reflection checked");
-        Class<?> caller = MemberBytecodeCallerFactory.create(
-                targetClass, "addedPulse", "addedLong", "addedReference");
         invokeCaller(caller, "invoke", target);
         invokeCaller(caller, "invoke", child);
         check(callbackCount == 4, "INVOKEVIRTUAL did not dispatch the added method");
+        SeraLegitHook.addInstanceMethod(
+                targetClass,
+                "addedTotal",
+                long.class,
+                new Class<?>[]{long.class, int.class, String.class},
+                (receiver, values) -> (Long) values[0] + (Integer) values[1]
+                        + ((String) values[2]).length());
+        Object totalTarget = MemberBytecodeCallerFactory.createInstanceFactory(targetClass)
+                .getDeclaredMethod("instantiate").invoke(null);
+        Class<?> totalCaller = MemberBytecodeCallerFactory.createVirtualCaller(
+                targetClass, "addedTotal", long.class, long.class, int.class, String.class);
+        check((Long) invokeCaller(totalCaller, "invoke", totalTarget, 40L, 2, "abc") == 45L,
+                "parameterized INVOKEVIRTUAL did not dispatch the callback");
+        check((Long) targetClass.getDeclaredMethod(
+                        "addedTotal", long.class, int.class, String.class)
+                        .invoke(totalTarget, 40L, 2, "abc") == 45L,
+                "reflection did not invoke the parameterized method");
+        SeraLegitHook.removeMethod(targetClass, "addedTotal", long.class, int.class, String.class);
+        expectNoMethod(targetClass, "addedTotal", long.class, int.class, String.class);
+        target = MemberBytecodeCallerFactory.createInstanceFactory(targetClass)
+                .getDeclaredMethod("instantiate").invoke(null);
         invokeCaller(caller, "writeLong", target, 0x1122334455667788L);
         long bytecodeLong = (Long) invokeCaller(caller, "readLong", target);
         check(bytecodeLong == 0x1122334455667788L, "GETFIELD/PUTFIELD did not use added storage");
+        Object bytecodeReferenceValue = new Object();
+        addedReference.set(target, bytecodeReferenceValue);
         Object bytecodeReference = invokeCaller(caller, "readReference", target);
-        check(bytecodeReference != null && bytecodeReference == addedReference.get(target),
+        check(bytecodeReference == bytecodeReferenceValue,
                 "reference GETFIELD did not read added storage");
         check(Class.forName(targetClass.getName(), false, targetClass.getClassLoader()) == targetClass,
                 "dictionary lookup no longer returns the target class");
@@ -122,14 +223,15 @@ public final class InstanceMemberTest {
         expectNoField(targetClass, "addedReference");
         check(fieldSize(targetClass) < expandedFieldSize,
                 "nonstatic field size did not shrink after reference removal");
-        check(MemberTarget.staticMarker == "static-retained", "static field was lost on removal");
+        check(MemberTarget.staticMarker == retainedStaticMarker, "static field was lost on removal");
 
         SeraLegitHook.removeField(targetClass, "addedLong");
         expectNoField(targetClass, "addedLong");
         check(fieldSize(targetClass) == initialFieldSize,
                 "nonstatic field size did not return to baseline");
-        MemberTarget reduced = new MemberTarget();
-        check(reduced.baseValue() == 11, "constructor failed after field removal");
+        Object reduced = targetClass.getDeclaredConstructor().newInstance();
+        check((Integer) targetClass.getDeclaredMethod("baseValue").invoke(reduced) == 11,
+                "constructor failed after field removal");
 
         System.out.println("instanceMembers: removals checked");
         for (int index = 0; index < 3; index++) {
@@ -137,10 +239,12 @@ public final class InstanceMemberTest {
             String methodName = "cycleMethod" + index;
             SeraLegitHook.addInstanceField(targetClass, fieldName, int.class, Modifier.PUBLIC);
             Field cycleField = targetClass.getDeclaredField(fieldName);
-            MemberTarget cycleTarget = new MemberTarget();
+            Object cycleTarget = MemberBytecodeCallerFactory.createInstanceFactory(targetClass)
+                    .getDeclaredMethod("instantiate").invoke(null);
             cycleField.setInt(cycleTarget, 700 + index);
             check(cycleField.getInt(cycleTarget) == 700 + index, "cycle field storage failed");
-            check(cycleTarget.baseValue() == 11, "cycle field overlapped existing storage");
+            check((Integer) targetClass.getDeclaredMethod("baseValue").invoke(cycleTarget) == 11,
+                    "cycle field overlapped existing storage");
             SeraLegitHook.removeField(targetClass, fieldName);
             expectNoField(targetClass, fieldName);
 
@@ -149,6 +253,9 @@ public final class InstanceMemberTest {
                     targetClass, methodName, receiver -> callbackCount++);
             int afterMethodVtable = vtableLength(targetClass);
             check(afterMethodVtable > beforeMethodVtable, "cycle method did not grow the vtable");
+            cycleTarget = MemberBytecodeCallerFactory.createInstanceFactory(targetClass)
+                    .getDeclaredMethod("instantiate").invoke(null);
+            cycleField.setInt(cycleTarget, 700 + index);
             targetClass.getDeclaredMethod(methodName).invoke(cycleTarget);
             SeraLegitHook.removeMethod(targetClass, methodName);
             expectNoMethod(targetClass, methodName);
@@ -168,17 +275,22 @@ public final class InstanceMemberTest {
 
     private static Object invokeCaller(Class<?> caller, String name, Object receiver, Object... arguments)
             throws Exception {
-        Class<?>[] parameterTypes = arguments.length == 0
-                ? new Class<?>[]{MemberTarget.class}
-                : new Class<?>[]{MemberTarget.class, long.class};
+        Method invoke = null;
+        for (Method candidate : caller.getDeclaredMethods()) {
+            if (candidate.getName().equals(name)) {
+                invoke = candidate;
+                break;
+            }
+        }
+        if (invoke == null) {
+            throw new NoSuchMethodException(name);
+        }
         Object[] values = new Object[arguments.length + 1];
         values[0] = receiver;
         System.arraycopy(arguments, 0, values, 1, arguments.length);
-        Method method = caller.getDeclaredMethod(name, parameterTypes);
-        method.setAccessible(true);
-        return method.invoke(null, values);
+        invoke.setAccessible(true);
+        return invoke.invoke(null, values);
     }
-
     private static int vtableLength(Class<?> type) {
         JVM jvm = JVM.getInstance();
         long klass = UnsafeUtility.UNSAFE.getLong(type, jvm.classKlassOffset);
@@ -207,9 +319,9 @@ public final class InstanceMemberTest {
         }
     }
 
-    private static void expectNoMethod(Class<?> type, String name) {
+    private static void expectNoMethod(Class<?> type, String name, Class<?>... parameterTypes) {
         try {
-            type.getDeclaredMethod(name);
+            type.getDeclaredMethod(name, parameterTypes);
             throw new IllegalStateException("method still visible: " + name);
         } catch (NoSuchMethodException expected) {
         }
@@ -222,6 +334,22 @@ public final class InstanceMemberTest {
             byte[] pressure = new byte[1 << 20];
             pressure[0] = (byte) index;
             Thread.sleep(20L);
+        }
+    }
+
+    private static final class ConstantPoolTarget {
+        private static String backing = "initial";
+
+        private static int warm(String value) {
+            return value.length();
+        }
+
+        private static int resolveAfterExpansion(String value) {
+            return value.indexOf('f');
+        }
+
+        private int existingVirtual() {
+            return 6;
         }
     }
 
